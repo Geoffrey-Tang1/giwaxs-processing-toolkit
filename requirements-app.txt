@@ -1,0 +1,9 @@
+# Extra dependencies for the Streamlit app (giwaxs_app.py) and the
+# FastAPI service (giwaxs_api.py). Install with:
+#   pip install -r requirements.txt -r requirements-app.txt
+streamlit
+pandas
+fastapi
+uvicorn[standard]
+python-multipart
+anthropic

@@ -1,0 +1,34 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+
+# This project's default output + generated configs (usually sample-specific,
+# not something you want to commit)
+GIWAXS_output/
+*.poni
+giwaxs_config.json
+
+# Raw data (typically far too large / not meant for version control --
+# remove these lines if you actually want to track sample data in-repo)
+*.tif
+*.tiff

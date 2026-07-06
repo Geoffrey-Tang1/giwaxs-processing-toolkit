@@ -1,0 +1,36 @@
+name: Sanity check
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  compile-check:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Byte-compile all modules
+        run: |
+          python -m py_compile giwaxs_common.py giwaxs_2d1d_agent.py giwaxs_polefigure_agent.py giwaxs_platform.py
+
+      - name: Check --help works for each entry point
+        run: |
+          python giwaxs_2d1d_agent.py --help
+          python giwaxs_polefigure_agent.py --help
+          python giwaxs_platform.py --help
