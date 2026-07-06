@@ -382,5 +382,4 @@ data at runtime.
 
 ## License
 
-MIT -- see [LICENSE](LICENSE). Replace the placeholder name in that file
-with your own before publishing.
+MIT -- see [LICENSE](LICENSE).
