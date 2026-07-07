@@ -2,3 +2,6 @@ numpy
 matplotlib
 pyFAI
 fabio
+streamlit
+pandas
+anthropic
