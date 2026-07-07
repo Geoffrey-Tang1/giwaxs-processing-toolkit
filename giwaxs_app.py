@@ -41,7 +41,7 @@ st.set_page_config(page_title="GIWAXS Processing Toolkit", layout="wide")
 # without conflicting -- widgets are always created with key=... only, never
 # both key= and value=, so whichever was last written to session_state wins)
 # --------------------------------------------------------------------------- #
-DEFAULTS = {
+STYLE_DEFAULTS = {
     "cmap": "viridis",
     "use_manual_scale": False,
     "vmin": 100.0,
@@ -52,9 +52,17 @@ DEFAULTS = {
     "sector_line_color": "#00ffff",
     "font_family": "DejaVu Sans",
     "font_size": 11.0,
+    "dpi": 400,
+    "axis_labels": "xyz",
 }
-for k, v in DEFAULTS.items():
-    st.session_state.setdefault(k, v)
+# Each tab gets its OWN independent copy of every style setting (keys
+# prefixed "2d_"/"pf_") -- style_widgets() is defined once but instantiated
+# inside BOTH tabs, and Streamlit runs the code in every tab on every
+# script run (not just the visible one), so two widgets sharing one
+# unprefixed key would collide (StreamlitDuplicateElementKey).
+for prefix in ("2d_", "pf_"):
+    for k, v in STYLE_DEFAULTS.items():
+        st.session_state.setdefault(prefix + k, v)
 st.session_state.setdefault("processed_2d", None)   # cached heavy-computation results
 st.session_state.setdefault("processed_pf", None)
 st.session_state.setdefault("calibration_confirmed", False)
@@ -136,12 +144,14 @@ def render_ai_assistant():
                     for key in ("cmap", "line_color", "sector_line_color",
                                 "font_family", "font_size", "vmin", "vmax"):
                         if key in result:
-                            st.session_state[key] = result[key]
+                            for prefix in ("2d_", "pf_"):
+                                st.session_state[prefix + key] = result[key]
                             applied.append(f"{key} = {result[key]}")
                     if applied:
                         if "vmin" in result or "vmax" in result:
-                            st.session_state["use_manual_scale"] = True
-                        st.success("Applied: " + ", ".join(applied))
+                            for prefix in ("2d_", "pf_"):
+                                st.session_state[prefix + "use_manual_scale"] = True
+                        st.success("Applied to both tabs: " + ", ".join(applied))
                         st.rerun()
                     else:
                         st.warning("Claude didn't return any recognized style keys.")
@@ -495,67 +505,64 @@ tab_2d, tab_pf = st.tabs(["2D image + line cuts", "Pole figure (cartesian)"])
 # --------------------------------------------------------------------------- #
 # Shared style widgets (used by both tabs where relevant)
 # --------------------------------------------------------------------------- #
-for k, v in {"dpi": 400, "axis_labels": "xyz"}.items():
-    st.session_state.setdefault(k, v)
-
-
 def style_widgets(show_cmap: bool, show_sector_color: bool, key_prefix: str):
+    p = key_prefix  # short alias, this function's keys get VERY repetitive otherwise
     cols = st.columns(4)
     with cols[0]:
         if show_cmap:
             category = st.selectbox("Colormap category", list(gc.COLORMAP_CATEGORIES.keys()),
-                                     key=f"{key_prefix}_cmap_category")
+                                     key=f"{p}_cmap_category")
             options = gc.COLORMAP_CATEGORIES[category]
-            if st.session_state["cmap"] not in options:
-                st.session_state["cmap"] = options[0]
-            st.selectbox("Colormap", options, key="cmap")
+            if st.session_state[f"{p}_cmap"] not in options:
+                st.session_state[f"{p}_cmap"] = options[0]
+            st.selectbox("Colormap", options, key=f"{p}_cmap")
     with cols[1]:
-        st.color_picker("Line colour", key="line_color")
+        st.color_picker("Line colour", key=f"{p}_line_color")
     with cols[2]:
         font_category = st.selectbox("Font category", list(gc.FONT_CATEGORIES.keys()),
-                                      key=f"{key_prefix}_font_category")
+                                      key=f"{p}_font_category")
         font_options = gc.FONT_CATEGORIES[font_category]
-        if st.session_state["font_family"] not in font_options:
-            st.session_state["font_family"] = font_options[0]
-        st.selectbox("Font family", font_options, key="font_family")
+        if st.session_state[f"{p}_font_family"] not in font_options:
+            st.session_state[f"{p}_font_family"] = font_options[0]
+        st.selectbox("Font family", font_options, key=f"{p}_font_family")
     with cols[3]:
         preset_label = st.selectbox("Font size", list(gc.FONT_SIZE_PRESETS.keys()),
-                                     key=f"{key_prefix}_font_size_preset")
+                                     key=f"{p}_font_size_preset")
         preset_value = gc.FONT_SIZE_PRESETS[preset_label]
         if preset_value is None:
             st.number_input("Custom size (pt)", min_value=4.0, max_value=48.0,
-                             key="font_size", format="%.1f")
+                             key=f"{p}_font_size", format="%.1f")
         else:
-            st.session_state["font_size"] = preset_value
+            st.session_state[f"{p}_font_size"] = preset_value
             st.caption(f"{preset_value:.0f}pt")
 
     cols2 = st.columns(3)
     with cols2[0]:
         if show_sector_color:
-            st.color_picker("Sector line colour", key="sector_line_color")
+            st.color_picker("Sector line colour", key=f"{p}_sector_line_color")
     with cols2[1]:
-        st.slider("Output resolution (DPI)", 72, 600, key="dpi", step=1)
+        st.slider("Output resolution (DPI)", 72, 600, key=f"{p}_dpi", step=1)
     with cols2[2]:
         if show_cmap:  # axis labels only meaningful for the 2D q-space image
             st.selectbox(
-                "Axis labels", ["ip_oop", "xyz"], key="axis_labels",
+                "Axis labels", ["ip_oop", "xyz"], key=f"{p}_axis_labels",
                 format_func=lambda v: "q_ip / q_oop" if v == "ip_oop" else "q_xy / q_z",
             )
 
     st.checkbox("Set explicit colour-scale range (instead of automatic percentile)",
-                key="use_manual_scale")
-    if st.session_state["use_manual_scale"]:
+                key=f"{p}_use_manual_scale")
+    if st.session_state[f"{p}_use_manual_scale"]:
         c1, c2 = st.columns(2)
         with c1:
-            st.number_input("Colour-scale min", key="vmin", format="%.4g")
+            st.number_input("Colour-scale min", key=f"{p}_vmin", format="%.4g")
         with c2:
-            st.number_input("Colour-scale max", key="vmax", format="%.4g")
+            st.number_input("Colour-scale max", key=f"{p}_vmax", format="%.4g")
     else:
         pc1, pc2 = st.columns(2)
         with pc1:
-            st.slider("Colour-scale minimum percentile", 0.0, 10.0, key="vmin_percentile")
+            st.slider("Colour-scale minimum percentile", 0.0, 10.0, key=f"{p}_vmin_percentile")
         with pc2:
-            st.slider("Colour-scale maximum percentile", 90.0, 100.0, key="vmax_percentile")
+            st.slider("Colour-scale maximum percentile", 90.0, 100.0, key=f"{p}_vmax_percentile")
 
 
 # --------------------------------------------------------------------------- #
@@ -637,20 +644,20 @@ with tab_2d:
             fig2d = gc.plot_2d_image(
                 res["res_qx"], res["res_qy"], res["res_I"],
                 out_path=None, qlim_x=qip_range, qlim_y=qoop_range,
-                vmin_percentile=st.session_state["vmin_percentile"],
-                vmax_percentile=st.session_state.get("vmax_percentile", 99.9),
-                cmap=st.session_state["cmap"],
-                vmin=st.session_state["vmin"] if st.session_state["use_manual_scale"] else None,
-                vmax=st.session_state["vmax"] if st.session_state["use_manual_scale"] else None,
-                font_family=st.session_state["font_family"],
-                font_size=st.session_state["font_size"],
-                axis_label_style=st.session_state["axis_labels"],
+                vmin_percentile=st.session_state["2d_vmin_percentile"],
+                vmax_percentile=st.session_state.get("2d_vmax_percentile", 99.9),
+                cmap=st.session_state["2d_cmap"],
+                vmin=st.session_state["2d_vmin"] if st.session_state["2d_use_manual_scale"] else None,
+                vmax=st.session_state["2d_vmax"] if st.session_state["2d_use_manual_scale"] else None,
+                font_family=st.session_state["2d_font_family"],
+                font_size=st.session_state["2d_font_size"],
+                axis_label_style=st.session_state["2d_axis_labels"],
             )
             c1, c2 = st.columns([2, 1])
             with c1:
                 st.pyplot(fig2d)
             buf = io.BytesIO()
-            fig2d.savefig(buf, format="png", dpi=st.session_state["dpi"])
+            fig2d.savefig(buf, format="png", dpi=st.session_state["2d_dpi"])
             import matplotlib.pyplot as plt
             plt.close(fig2d)
             c2.download_button("Download 2D image PNG", buf.getvalue(),
@@ -661,15 +668,15 @@ with tab_2d:
                 fig1d = gc.plot_1d_linecut(
                     q, intensity, out_path=None, angle_range=angles,
                     title=f"{res['name']}: {angles} deg",
-                    line_color=st.session_state["line_color"],
-                    font_family=st.session_state["font_family"],
-                    font_size=st.session_state["font_size"],
+                    line_color=st.session_state["2d_line_color"],
+                    font_family=st.session_state["2d_font_family"],
+                    font_size=st.session_state["2d_font_size"],
                 )
                 lc1, lc2 = st.columns([2, 1])
                 with lc1:
                     st.pyplot(fig1d)
                 buf2 = io.BytesIO()
-                fig1d.savefig(buf2, format="png", dpi=st.session_state["dpi"])
+                fig1d.savefig(buf2, format="png", dpi=st.session_state["2d_dpi"])
                 plt.close(fig1d)
                 tag = f"{angles[0]}_{angles[1]}".replace("-", "m").replace(".", "p")
                 lc2.download_button(
@@ -830,9 +837,9 @@ with tab_pf:
                 fig = gc.plot_chi_intensity_profile(
                     chi_axis, profile, out_path=None, target_q=target_q, dq=dq,
                     title=res["name"], herman_s=herman_s, chi_range=chi_plot_range,
-                    line_color=st.session_state["line_color"],
-                    font_family=st.session_state["font_family"],
-                    font_size=st.session_state["font_size"],
+                    line_color=st.session_state["pf_line_color"],
+                    font_family=st.session_state["pf_font_family"],
+                    font_size=st.session_state["pf_font_size"],
                 )
                 pc1, pc2 = st.columns([2, 1])
                 with pc1:
@@ -840,7 +847,7 @@ with tab_pf:
                 if herman_s is not None:
                     pc2.metric("Herman's S", f"{herman_s:.3f}")
                 buf = io.BytesIO()
-                fig.savefig(buf, format="png", dpi=st.session_state["dpi"])
+                fig.savefig(buf, format="png", dpi=st.session_state["pf_dpi"])
                 plt.close(fig)
                 q_tag = f"{target_q:.3f}".replace(".", "p")
                 pc2.download_button(
