@@ -31,6 +31,18 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 from matplotlib.ticker import MultipleLocator
 
+# matplotlib logs a "findfont: Font family '...' not found" warning for
+# EVERY text element rendered with an unavailable font (once per axis
+# label, tick, title, ...) -- on a busy server this floods the logs so
+# badly that genuinely useful log output (build/deploy messages, our own
+# print() diagnostics) gets pushed out of any bounded log viewer/download.
+# We already handle "font not available" ourselves (see
+# get_available_font_categories / resolve_font_family), so this warning
+# is redundant noise here, not new information -- silence it specifically
+# (not all matplotlib logging) so real problems still surface normally.
+import logging
+logging.getLogger("matplotlib.font_manager").setLevel(logging.ERROR)
+
 # NumPy >= 2.0 renamed trapz -> trapezoid (and removed the old name in some
 # builds); NumPy < 2.0 only has trapz. This shim works either way.
 _trapz = getattr(np, "trapezoid", None) or np.trapz
