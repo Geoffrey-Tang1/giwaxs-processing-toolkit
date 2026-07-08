@@ -68,6 +68,20 @@ st.session_state.setdefault("processed_pf", None)
 st.session_state.setdefault("calibration_confirmed", False)
 st.session_state.setdefault("calibration_diagnostic_path", None)
 
+# Apply any calibration result from the PREVIOUS run now, before the
+# Geometry section's widgets (beam_center_y/x, distance, rot1-3) are
+# instantiated below -- Streamlit forbids setting a widget's
+# session_state value after that widget has already rendered in the
+# current run, so the "Calibrate now" button (see the Calibration
+# section further down) can't update these directly; instead it stashes
+# the new values here and triggers a rerun, and THIS block is what
+# actually applies them, at a point in the script that's safely before
+# those widgets exist yet.
+_pending_calib = st.session_state.pop("_pending_calibration_update", None)
+if _pending_calib:
+    for _k, _v in _pending_calib.items():
+        st.session_state[_k] = _v
+
 
 # --------------------------------------------------------------------------- #
 # AI style assistant (optional -- needs an Anthropic API key)
@@ -347,16 +361,24 @@ with st.sidebar:
                         guess_r1, guess_r2, guess_r3, calibrant_name, int(calib_max_rings),
                         calib_min_intensity, fabio, diagnostic_path=diagnostic_path,
                     )
-                    # Write the refined values back into the SAME widget keys
-                    # used above, so the Geometry section immediately reflects
-                    # them, and Process (later) uses them directly with no
-                    # need to re-run calibration itself.
-                    st.session_state["beam_center_y"] = result["poni1"] / detector.pixel1
-                    st.session_state["beam_center_x"] = result["poni2"] / detector.pixel2
-                    st.session_state["distance"] = result["dist"]
-                    st.session_state["rot1"] = result["rot1"]
-                    st.session_state["rot2"] = result["rot2"]
-                    st.session_state["rot3"] = result["rot3"]
+                    # NOTE: can't directly assign st.session_state["beam_center_y"]
+                    # etc. here -- those widgets already rendered earlier in
+                    # THIS run (Geometry is section 2, above Calibration's
+                    # section 3), and Streamlit forbids modifying a widget's
+                    # session_state value after it's been instantiated in the
+                    # same run. Instead, stash the new values under a
+                    # differently-named key and apply them at the very top of
+                    # the script on the NEXT run (before those widgets are
+                    # instantiated again) -- see the "pending calibration
+                    # update" block near the top of this file.
+                    st.session_state["_pending_calibration_update"] = {
+                        "beam_center_y": result["poni1"] / detector.pixel1,
+                        "beam_center_x": result["poni2"] / detector.pixel2,
+                        "distance": result["dist"],
+                        "rot1": result["rot1"],
+                        "rot2": result["rot2"],
+                        "rot3": result["rot3"],
+                    }
                     st.session_state["calibration_confirmed"] = True
                     st.session_state["calibration_diagnostic_path"] = result.get("diagnostic_path")
                     st.session_state["calibration_chi2"] = (result["init_chi2"], result["final_chi2"])
