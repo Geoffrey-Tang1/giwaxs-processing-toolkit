@@ -615,34 +615,53 @@ def build_detector(args, Detector, detector_factory):
 
 
 def plot_calibration_diagnostic(calib_img, cp, refined_geom, calibrant, out_path,
-                                 title: Optional[str] = None):
+                                 title: Optional[str] = None, max_pixels: int = 400_000):
     """Visual sanity check for an AgBeh (or other calibrant) ring fit:
     the raw calibration image (log scale) with the extracted control
     points overlaid (colored by ring index) and the fitted ring positions
     (from the refined geometry) drawn as contour lines on top. If the fit
     is good, the contour lines should sit right on top of the real
     diffraction rings, and the coloured dots should form clean circles.
+
+    For large (real detector-sized) images, this downsamples BEFORE
+    rendering -- a full-resolution detector frame plus a full-resolution
+    2-theta array plus matplotlib's own rendering overhead can add up to
+    a meaningful amount of memory, which matters on memory-constrained
+    deployments (e.g. Streamlit Community Cloud's free tier). This is a
+    sanity-check plot, not a publication figure, so a coarser resolution
+    doesn't lose anything that matters for judging the fit.
     """
-    fig, ax = plt.subplots(figsize=(8, 8), dpi=150)
-    positive = calib_img[calib_img > 0]
+    h, w = calib_img.shape
+    factor = max(1, int(np.ceil(np.sqrt((h * w) / max_pixels))))
+
+    if factor > 1:
+        small_img = calib_img[::factor, ::factor]
+    else:
+        small_img = calib_img
+
+    fig, ax = plt.subplots(figsize=(7, 7), dpi=120)
+    positive = small_img[small_img > 0]
     vmin = max(np.percentile(positive, 1), 1) if positive.size else 1
     vmax = np.percentile(positive, 99.5) if positive.size else 1
     if vmax <= vmin:
         vmax = vmin * 10
-    ax.imshow(calib_img, norm=LogNorm(vmin=vmin, vmax=vmax), cmap="inferno")
+    ax.imshow(small_img, norm=LogNorm(vmin=vmin, vmax=vmax), cmap="inferno")
 
     pts = np.asarray(cp.getList())
     if pts.size:
-        sc = ax.scatter(pts[:, 1], pts[:, 0], s=4, c=pts[:, 2], cmap="tab10",
-                         label="detected points")
+        sc = ax.scatter(pts[:, 1] / factor, pts[:, 0] / factor, s=4, c=pts[:, 2],
+                         cmap="tab10", label="detected points")
         plt.colorbar(sc, ax=ax, label="ring index", fraction=0.046, pad=0.04)
 
     try:
         tth_array = refined_geom.twoThetaArray(calib_img.shape)
+        if factor > 1:
+            tth_array = tth_array[::factor, ::factor]
         for tth_ring in calibrant.get_2th():
             if tth_ring is None:
                 continue
             ax.contour(tth_array, levels=[tth_ring], colors="lime", linewidths=0.6)
+        del tth_array  # this one can be large before downsampling; free it promptly
     except Exception:
         pass  # diagnostic overlay is best-effort; missing it isn't fatal
 
@@ -653,7 +672,7 @@ def plot_calibration_diagnostic(calib_img, cp, refined_geom, calibrant, out_path
         fontsize=10,
     )
     fig.tight_layout()
-    fig.savefig(out_path, dpi=150)
+    fig.savefig(out_path, dpi=120)
     plt.close(fig)
 
 
