@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 from typing import List, Tuple, Optional
 
 import numpy as np
@@ -260,6 +261,22 @@ def process_file(tiff_path: str, fi, get_unit_fiber, mask, args, out_dirs, fabio
 # Main
 # --------------------------------------------------------------------------- #
 def main(argv: Optional[List[str]] = None):
+    """Thin wrapper around _main_impl that converts a GiwaxsError (raised
+    by shared giwaxs_common.py logic for bad input/config) into a clean
+    sys.exit(), exactly matching this script's pre-existing CLI error
+    behaviour. This wrapper (rather than a bare `if __name__ == "__main__"`
+    guard) is what actually matters here: giwaxs_platform.py calls this
+    main() function directly, in-process, so the try/except needs to be
+    inside main() itself to protect that call path too, not just direct
+    command-line invocation.
+    """
+    try:
+        _main_impl(argv)
+    except gc.GiwaxsError as exc:
+        sys.exit(str(exc))
+
+
+def _main_impl(argv: Optional[List[str]] = None):
     args = parse_args(argv)
     fabio, FiberIntegrator, get_unit_fiber, Detector, detector_factory = gc.import_pyfai_stack()
 
