@@ -22,6 +22,7 @@ Run with:
 from __future__ import annotations
 
 import io
+import zipfile
 import json
 import os
 import tempfile
@@ -31,7 +32,8 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-import giwaxs_common as gc
+import giwaxs_common as gc  # noqa: E402 -- sets the Agg backend before pyplot is imported
+import matplotlib.pyplot as plt  # noqa: E402 -- must come after giwaxs_common
 
 
 st.set_page_config(page_title="GIWAXS Processing Toolkit", layout="wide")
@@ -181,6 +183,89 @@ def save_upload_to_temp(uploaded_file) -> str:
     tmp.write(uploaded_file.getvalue())
     tmp.close()
     return tmp.name
+
+
+def build_2d_results_zip(qip_range, qoop_range) -> bytes:
+    """Bundle every currently-processed 2D image + line cut (across the
+    whole batch) into one ZIP, built in-memory using whatever style
+    settings are CURRENTLY selected (so it matches what's on screen).
+    Figures are cheap to regenerate on demand (the expensive pyFAI work
+    is already cached in session_state).
+    """
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for res in st.session_state["processed_2d"]:
+            name = res["name"]
+            fig2d = gc.plot_2d_image(
+                res["res_qx"], res["res_qy"], res["res_I"],
+                out_path=None, qlim_x=qip_range, qlim_y=qoop_range,
+                vmin_percentile=st.session_state["2d_vmin_percentile"],
+                vmax_percentile=st.session_state.get("2d_vmax_percentile", 99.9),
+                cmap=st.session_state["2d_cmap"],
+                vmin=st.session_state["2d_vmin"] if st.session_state["2d_use_manual_scale"] else None,
+                vmax=st.session_state["2d_vmax"] if st.session_state["2d_use_manual_scale"] else None,
+                font_family=st.session_state["2d_font_family"],
+                font_size=st.session_state["2d_font_size"],
+                axis_label_style=st.session_state["2d_axis_labels"],
+            )
+            img_buf = io.BytesIO()
+            fig2d.savefig(img_buf, format="png", dpi=st.session_state["2d_dpi"])
+            plt.close(fig2d)
+            zf.writestr(f"{name}/{name}_2D_GIWAXS.png", img_buf.getvalue())
+
+            for angles, q, intensity in res["linecuts"]:
+                tag = f"{angles[0]}_{angles[1]}".replace("-", "m").replace(".", "p")
+                fig1d = gc.plot_1d_linecut(
+                    q, intensity, out_path=None, angle_range=angles,
+                    title=f"{name}: {angles} deg",
+                    line_color=st.session_state["2d_line_color"],
+                    font_family=st.session_state["2d_font_family"],
+                    font_size=st.session_state["2d_font_size"],
+                )
+                lc_buf = io.BytesIO()
+                fig1d.savefig(lc_buf, format="png", dpi=st.session_state["2d_dpi"])
+                plt.close(fig1d)
+                zf.writestr(f"{name}/{name}_lineprofile_{tag}.png", lc_buf.getvalue())
+
+                txt_buf = io.StringIO()
+                np.savetxt(txt_buf, np.c_[q, intensity], header="Q(1/A)\tIntensity(a.u.)")
+                zf.writestr(f"{name}/{name}_lineprofile_{tag}.txt", txt_buf.getvalue())
+
+                linecut_df = pd.DataFrame({"Q (1/A)": q, "Intensity (a.u.)": intensity})
+                zf.writestr(f"{name}/{name}_lineprofile_{tag}.csv", linecut_df.to_csv(index=False))
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def build_pf_results_zip(dq, chi_plot_range) -> bytes:
+    """Same idea as build_2d_results_zip, for every currently-processed
+    pole figure (across the whole batch and every target q)."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for res in st.session_state["processed_pf"]:
+            name = res["name"]
+            for target_q, chi_axis, profile, herman_s in res["per_q"]:
+                q_tag = f"{target_q:.3f}".replace(".", "p")
+                fig = gc.plot_chi_intensity_profile(
+                    chi_axis, profile, out_path=None, target_q=target_q, dq=dq,
+                    title=name, herman_s=herman_s, chi_range=chi_plot_range,
+                    line_color=st.session_state["pf_line_color"],
+                    font_family=st.session_state["pf_font_family"],
+                    font_size=st.session_state["pf_font_size"],
+                )
+                img_buf = io.BytesIO()
+                fig.savefig(img_buf, format="png", dpi=st.session_state["pf_dpi"])
+                plt.close(fig)
+                zf.writestr(f"{name}/{name}_polefigure_q{q_tag}.png", img_buf.getvalue())
+
+                txt_buf = io.StringIO()
+                header = "Chi(deg)\tIntensity(a.u.)"
+                if herman_s is not None:
+                    header = f"Herman_S={herman_s:.6f}\n{header}"
+                np.savetxt(txt_buf, np.c_[chi_axis, profile], header=header)
+                zf.writestr(f"{name}/{name}_polefigure_q{q_tag}_chi_profile.txt", txt_buf.getvalue())
+    buf.seek(0)
+    return buf.getvalue()
 
 
 # --------------------------------------------------------------------------- #
@@ -662,6 +747,12 @@ with tab_2d:
             st.session_state["processed_2d"] = results
 
     if st.session_state["processed_2d"]:
+        st.download_button(
+            "⬇️ Download ALL 2D images + line cuts (ZIP)",
+            build_2d_results_zip(qip_range, qoop_range),
+            file_name="giwaxs_2d_results.zip", mime="application/zip",
+            key="dl_all_2d_zip",
+        )
         for res in st.session_state["processed_2d"]:
             st.markdown(f"#### {res['name']}")
             fig2d = gc.plot_2d_image(
@@ -681,7 +772,6 @@ with tab_2d:
                 st.pyplot(fig2d)
             buf = io.BytesIO()
             fig2d.savefig(buf, format="png", dpi=st.session_state["2d_dpi"])
-            import matplotlib.pyplot as plt
             plt.close(fig2d)
             c2.download_button("Download 2D image PNG", buf.getvalue(),
                                 file_name=f"{res['name']}_2D_GIWAXS.png", mime="image/png",
@@ -864,7 +954,12 @@ with tab_pf:
                 st.session_state["processed_pf"] = results
 
     if st.session_state["processed_pf"]:
-        import matplotlib.pyplot as plt
+        st.download_button(
+            "⬇️ Download ALL pole figures (ZIP)",
+            build_pf_results_zip(dq, chi_plot_range),
+            file_name="giwaxs_pole_figure_results.zip", mime="application/zip",
+            key="dl_all_pf_zip",
+        )
         for res in st.session_state["processed_pf"]:
             st.markdown(f"#### {res['name']}")
             for target_q, chi_axis, profile, herman_s in res["per_q"]:
