@@ -611,10 +611,18 @@ def get_available_font_categories() -> Dict[str, List[str]]:
     literal requested name isn't -- resolve_font_family() does that swap
     at render time. Generic keywords (sans-serif/serif/monospace) are
     always kept since matplotlib always resolves those successfully.
-    Computed fresh each call (cheap) rather than cached at import time,
-    since it's only ever called when building UI options.
+
+    Rebuilds matplotlib's font manager from scratch (re-scanning the
+    system's actual font directories) rather than trusting its cached
+    font list -- matplotlib caches what it finds in a JSON file on first
+    use, and if that cache was built BEFORE packages.txt's font packages
+    were installed (e.g. an old cached container layer, or the cache
+    simply predating this deploy), newly-installed system fonts wouldn't
+    be picked up without this. A fresh scan costs well under a second and
+    this only runs once at import time, so the cost is a non-issue.
     """
     import matplotlib.font_manager as fm
+    fm.fontManager = fm.FontManager()  # re-scan system fonts, ignore stale cache
     installed = {f.name for f in fm.fontManager.ttflist}
 
     def _is_available(name: str) -> bool:
