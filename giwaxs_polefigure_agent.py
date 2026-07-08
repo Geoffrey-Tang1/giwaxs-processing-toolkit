@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 from typing import List, Optional
 
 import giwaxs_common as gc
@@ -211,6 +212,17 @@ def process_file(tiff_path: str, fi, get_unit_fiber, mask, args,
 # Main
 # --------------------------------------------------------------------------- #
 def main(argv: Optional[List[str]] = None):
+    """Thin wrapper around _main_impl -- see the identical wrapper in
+    giwaxs_2d1d_agent.py for the full rationale (converts GiwaxsError into
+    a clean sys.exit(), and matters for giwaxs_platform.py's in-process
+    call path too, not just direct CLI use)."""
+    try:
+        _main_impl(argv)
+    except gc.GiwaxsError as exc:
+        sys.exit(str(exc))
+
+
+def _main_impl(argv: Optional[List[str]] = None):
     args = parse_args(argv)
     fabio, FiberIntegrator, get_unit_fiber, Detector, detector_factory = gc.import_pyfai_stack()
 
