@@ -28,6 +28,7 @@ import tempfile
 from typing import Optional
 
 import numpy as np
+import pandas as pd
 import streamlit as st
 
 import giwaxs_common as gc
@@ -706,6 +707,9 @@ with tab_2d:
                     file_name=f"{res['name']}_lineprofile_{tag}.png", mime="image/png",
                     key=f"dl1d_{res['name']}_{tag}",
                 )
+
+                linecut_df = pd.DataFrame({"Q (1/A)": q, "Intensity (a.u.)": intensity})
+
                 txt_buf = io.StringIO()
                 np.savetxt(txt_buf, np.c_[q, intensity], header="Q(1/A)\tIntensity(a.u.)")
                 lc2.download_button(
@@ -713,6 +717,15 @@ with tab_2d:
                     file_name=f"{res['name']}_lineprofile_{tag}.txt", mime="text/plain",
                     key=f"dltxt_{res['name']}_{tag}",
                 )
+                lc2.download_button(
+                    f"Download line cut {angles} data (.csv)",
+                    linecut_df.to_csv(index=False),
+                    file_name=f"{res['name']}_lineprofile_{tag}.csv", mime="text/csv",
+                    key=f"dlcsv_{res['name']}_{tag}",
+                )
+
+                with st.expander(f"View data table -- {res['name']}: {angles} deg"):
+                    st.dataframe(linecut_df, use_container_width=True, height=250)
 
 # --------------------------------------------------------------------------- #
 # Tab 2: pole figure (cartesian only)
@@ -743,11 +756,10 @@ with tab_pf:
             st.session_state["_qmap_upload_name"] = qmap_upload.name
             st.success(f"Loaded {len(loaded_map)} file(s) from {qmap_upload.name} into the table below.")
             st.rerun()
-        except SystemExit as exc:
+        except gc.GiwaxsError as exc:
             st.error(f"Could not read mapping file: {exc}")
 
     if uploaded_files:
-        import pandas as pd
 
         # Build/refresh the table to match the currently uploaded files,
         # preserving any values already typed for filenames still present.
