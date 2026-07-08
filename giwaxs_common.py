@@ -563,12 +563,91 @@ def resolve_incident_angle_for_file(tiff_path: str, fallback_deg: float,
 # --------------------------------------------------------------------------- #
 # Font styling presets
 # --------------------------------------------------------------------------- #
-#: Font families grouped by category, for a friendlier picker than one long list.
-FONT_CATEGORIES = {
-    "Sans-serif": ["DejaVu Sans", "Arial", "Helvetica", "sans-serif"],
-    "Serif": ["Times New Roman", "serif"],
-    "Monospace": ["monospace"],
+#: Candidate font families grouped by category. Proprietary fonts (Arial,
+#: Helvetica, Times New Roman) are only genuinely usable if the OS happens
+#: to have them installed -- on a typical Linux server (e.g. Streamlit
+#: Community Cloud) they're usually NOT present, and matplotlib silently
+#: substitutes its own default font instead of raising an error, so
+#: picking one from a UI dropdown would look like it did nothing. Each
+#: category also includes an open, metrically-similar alternative that's
+#: commonly actually installed on Linux (Liberation/TeX-Gyre families),
+#: plus the generic CSS-style keyword as a guaranteed-to-work fallback.
+_FONT_CATEGORIES_CANDIDATES = {
+    "Sans-serif": ["DejaVu Sans", "Arial", "Helvetica", "Liberation Sans",
+                   "TeX Gyre Heros", "sans-serif"],
+    "Serif": ["DejaVu Serif", "Times New Roman", "Liberation Serif",
+              "TeX Gyre Termes", "serif"],
+    "Monospace": ["DejaVu Sans Mono", "Liberation Mono", "monospace"],
 }
+
+#: Matplotlib always resolves these generic CSS-style family keywords to
+#: SOME installed font (never raises, never silently no-ops) -- safe to
+#: offer regardless of what's actually installed.
+_ALWAYS_SAFE_FONT_KEYWORDS = {"sans-serif", "serif", "monospace"}
+
+#: Familiar commercial font names (Arial, Helvetica, Times New Roman) are
+#: almost never actually INSTALLED on a Linux server (they're proprietary),
+#: so matplotlib would silently fall back to its default whenever one is
+#: requested -- but they're names people recognize and expect to see in a
+#: picker. Rather than hide them, keep them SELECTABLE (as long as their
+#: metric-compatible open-source substitute is actually installed) and
+#: transparently swap in the substitute at render time -- see
+#: resolve_font_family(), used by style_context() so every plot benefits
+#: without each caller needing to know about this.
+FONT_SUBSTITUTIONS = {
+    "Arial": "Liberation Sans",
+    "Helvetica": "TeX Gyre Heros",
+    "Times New Roman": "Liberation Serif",
+}
+
+
+def get_available_font_categories() -> Dict[str, List[str]]:
+    """Filter _FONT_CATEGORIES_CANDIDATES down to fonts that will actually
+    RENDER as something sensible in the CURRENT environment (checked via
+    matplotlib's own font manager), so a UI picker built from this never
+    offers a choice that would silently do nothing. A name in
+    FONT_SUBSTITUTIONS (e.g. "Arial") counts as available if its
+    substitute (e.g. "Liberation Sans") is installed, even though the
+    literal requested name isn't -- resolve_font_family() does that swap
+    at render time. Generic keywords (sans-serif/serif/monospace) are
+    always kept since matplotlib always resolves those successfully.
+    Computed fresh each call (cheap) rather than cached at import time,
+    since it's only ever called when building UI options.
+    """
+    import matplotlib.font_manager as fm
+    installed = {f.name for f in fm.fontManager.ttflist}
+
+    def _is_available(name: str) -> bool:
+        if name in _ALWAYS_SAFE_FONT_KEYWORDS or name in installed:
+            return True
+        substitute = FONT_SUBSTITUTIONS.get(name)
+        return substitute is not None and substitute in installed
+
+    result = {}
+    for category, candidates in _FONT_CATEGORIES_CANDIDATES.items():
+        available = [f for f in candidates if _is_available(f)]
+        if available:
+            result[category] = available
+    return result
+
+
+def resolve_font_family(font_family: Optional[str]) -> Optional[str]:
+    """Swap a familiar-but-likely-uninstalled name (Arial, Helvetica,
+    Times New Roman) for its metric-compatible, actually-installed
+    open-source substitute. Anything else (DejaVu Sans, Liberation Sans,
+    the generic sans-serif/serif/monospace keywords, etc.) passes through
+    unchanged. Centralizing this here (called from style_context) means
+    every plotting function benefits automatically.
+    """
+    if font_family is None:
+        return None
+    return FONT_SUBSTITUTIONS.get(font_family, font_family)
+
+
+#: Computed once at import time for convenience (gc.FONT_CATEGORIES is used
+#: as a plain dict elsewhere) -- reflects whatever's installed wherever
+#: this process happens to be running (local machine, Streamlit Cloud, etc).
+FONT_CATEGORIES = get_available_font_categories()
 
 #: Font size presets (points), for a friendlier picker than a raw slider.
 #: "Custom" (mapped to None here) signals the caller to show a free-entry
@@ -1048,7 +1127,7 @@ def style_context(font_family: Optional[str] = None, font_size: Optional[float] 
     """
     rc: Dict[str, object] = {}
     if font_family:
-        rc["font.family"] = font_family
+        rc["font.family"] = resolve_font_family(font_family)
     if font_size:
         rc["font.size"] = font_size
         rc["axes.titlesize"] = font_size
@@ -1079,10 +1158,11 @@ COLORMAP_CATEGORIES = {
 
 #: A curated subset of fonts that are broadly available/bundled with
 #: matplotlib's default fallback fonts, safe to offer in a UI dropdown.
-COMMON_FONTS = [
-    "DejaVu Sans", "Arial", "Helvetica", "sans-serif",
-    "Times New Roman", "serif", "monospace",
-]
+#: Flattened, deduplicated view of FONT_CATEGORIES for places that just
+#: want a simple list (e.g. CLI --help text) rather than the grouped dict.
+COMMON_FONTS = list(dict.fromkeys(
+    font for fonts in FONT_CATEGORIES.values() for font in fonts
+))
 
 
 def resolve_vmin_vmax(intensity: np.ndarray, vmin_percentile: float,
