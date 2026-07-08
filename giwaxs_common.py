@@ -36,6 +36,32 @@ from matplotlib.ticker import MultipleLocator
 _trapz = getattr(np, "trapezoid", None) or np.trapz
 
 
+class GiwaxsError(Exception):
+    """Raised for user-facing input/configuration errors (bad file paths,
+    missing required parameters, malformed data, etc.).
+
+    Library functions in this module raise this instead of calling
+    sys.exit() directly. sys.exit() raises SystemExit, which is NOT a
+    subclass of Exception -- a normal "except Exception" handler (as used
+    throughout giwaxs_app.py) does NOT catch it, so calling sys.exit()
+    from code that's imported and called in-process by the Streamlit app
+    (rather than run as its own standalone CLI process) would crash or
+    hang the whole app session instead of showing a clean error message.
+
+    Each CLI agent's main() catches GiwaxsError at the top level and
+    converts it to sys.exit(str(exc)) itself, so command-line behaviour
+    (clean one-line error message, non-zero exit code, no traceback) is
+    unchanged from before this was introduced.
+    """
+    pass
+
+
+def _raise_error(message: str):
+    """Library code calls this instead of sys.exit() directly -- see
+    GiwaxsError's docstring for why."""
+    raise GiwaxsError(message)
+
+
 # --------------------------------------------------------------------------- #
 # Dependency import
 # --------------------------------------------------------------------------- #
@@ -47,7 +73,7 @@ def import_pyfai_stack():
         from pyFAI.units import get_unit_fiber
         from pyFAI.detectors import Detector, detector_factory
     except ImportError as exc:
-        sys.exit(
+        _raise_error(
             "Missing dependency: {}\n"
             "Install requirements with:\n"
             "    pip install pyFAI fabio numpy matplotlib\n".format(exc)
@@ -339,7 +365,7 @@ def resolve_input_output(args) -> Tuple[str, str]:
     """
     input_path = args.input if args.input else prompt_for_input_path()
     if not os.path.exists(input_path):
-        sys.exit(f"Input path not found: {input_path}")
+        _raise_error(f"Input path not found: {input_path}")
 
     output_dir = args.output_dir if args.output_dir else prompt_for_output_dir()
     os.makedirs(output_dir, exist_ok=True)
@@ -353,12 +379,12 @@ def resolve_tiff_files(input_path: str) -> List[str]:
             + glob.glob(os.path.join(input_path, "*.tiff"))
         )
         if not tiff_files:
-            sys.exit(f"No .tif/.tiff files found in directory: {input_path}")
+            _raise_error(f"No .tif/.tiff files found in directory: {input_path}")
         return tiff_files
     elif os.path.isfile(input_path):
         return [input_path]
     else:
-        sys.exit(f"Input path not found: {input_path}")
+        _raise_error(f"Input path not found: {input_path}")
 
 
 def load_pole_figure_q_map(path: str) -> Dict[str, List[float]]:
@@ -372,7 +398,7 @@ def load_pole_figure_q_map(path: str) -> Dict[str, List[float]]:
                   separated numbers in the q_values column), one row per file.
     """
     if not os.path.exists(path):
-        sys.exit(f"Pole-figure q-map file not found: {path}")
+        _raise_error(f"Pole-figure q-map file not found: {path}")
     ext = os.path.splitext(path)[1].lower()
     result: Dict[str, List[float]] = {}
 
@@ -388,7 +414,7 @@ def load_pole_figure_q_map(path: str) -> Dict[str, List[float]]:
             try:
                 qvals = [float(v) for v in str(qvals_raw).replace(",", " ").split()]
             except ValueError:
-                sys.exit(f"Could not parse q values '{qvals_raw}' for '{fname}' in {path}")
+                _raise_error(f"Could not parse q values '{qvals_raw}' for '{fname}' in {path}")
             result[os.path.basename(fname)] = qvals
 
     if ext == ".json":
@@ -405,7 +431,7 @@ def load_pole_figure_q_map(path: str) -> Dict[str, List[float]]:
         try:
             import pandas as pd
         except ImportError:
-            sys.exit(
+            _raise_error(
                 "Reading an Excel (.xlsx/.xls) q-map requires the 'pandas' "
                 "and 'openpyxl' packages. Install with:\n"
                 "    pip install pandas openpyxl\n"
@@ -414,10 +440,10 @@ def load_pole_figure_q_map(path: str) -> Dict[str, List[float]]:
         df = pd.read_excel(path, dtype=str)
         _parse_rows(df.to_dict("records"))
     else:
-        sys.exit(f"Unsupported q-map file format: '{ext}' -- use .json, .csv, or .xlsx")
+        _raise_error(f"Unsupported q-map file format: '{ext}' -- use .json, .csv, or .xlsx")
 
     if not result:
-        sys.exit(f"No usable filename/q-value rows found in {path}. Expected "
+        _raise_error(f"No usable filename/q-value rows found in {path}. Expected "
                   f"a 'filename' column/key and a 'q_values' (or 'q') column/key.")
 
     return result
@@ -454,7 +480,7 @@ def load_incident_angle_map(path: str) -> Dict[str, float]:
     CSV/Excel format: columns 'filename' and 'incident_angle' (or 'angle').
     """
     if not os.path.exists(path):
-        sys.exit(f"Incident-angle-map file not found: {path}")
+        _raise_error(f"Incident-angle-map file not found: {path}")
     ext = os.path.splitext(path)[1].lower()
     result: Dict[str, float] = {}
 
@@ -469,7 +495,7 @@ def load_incident_angle_map(path: str) -> Dict[str, float]:
             try:
                 result[os.path.basename(fname)] = float(angle_raw)
             except ValueError:
-                sys.exit(f"Could not parse incident angle '{angle_raw}' for '{fname}' in {path}")
+                _raise_error(f"Could not parse incident angle '{angle_raw}' for '{fname}' in {path}")
 
     if ext == ".json":
         with open(path) as f:
@@ -483,7 +509,7 @@ def load_incident_angle_map(path: str) -> Dict[str, float]:
         try:
             import pandas as pd
         except ImportError:
-            sys.exit(
+            _raise_error(
                 "Reading an Excel (.xlsx/.xls) angle-map requires the "
                 "'pandas' and 'openpyxl' packages. Install with:\n"
                 "    pip install pandas openpyxl\n"
@@ -492,10 +518,10 @@ def load_incident_angle_map(path: str) -> Dict[str, float]:
         df = pd.read_excel(path, dtype=str)
         _parse_rows(df.to_dict("records"))
     else:
-        sys.exit(f"Unsupported angle-map file format: '{ext}' -- use .json, .csv, or .xlsx")
+        _raise_error(f"Unsupported angle-map file format: '{ext}' -- use .json, .csv, or .xlsx")
 
     if not result:
-        sys.exit(f"No usable filename/angle rows found in {path}. Expected "
+        _raise_error(f"No usable filename/angle rows found in {path}. Expected "
                   f"a 'filename' column/key and an 'incident_angle' (or "
                   f"'angle') column/key.")
 
@@ -569,14 +595,14 @@ def load_poni_file(path: str) -> Dict[str, object]:
     wavelength, detector (a ready-to-use pyFAI Detector instance).
     """
     if not os.path.exists(path):
-        sys.exit(f"PONI file not found: {path}")
+        _raise_error(f"PONI file not found: {path}")
     from pyFAI.io.ponifile import PoniFile
     try:
         poni = PoniFile(data=path)
     except Exception as exc:
-        sys.exit(f"Could not read PONI file '{path}': {exc}")
+        _raise_error(f"Could not read PONI file '{path}': {exc}")
     if poni.detector is None:
-        sys.exit(f"PONI file '{path}' does not specify a detector.")
+        _raise_error(f"PONI file '{path}' does not specify a detector.")
     return {
         "dist": poni.dist,
         "poni1": poni.poni1,
@@ -591,7 +617,7 @@ def load_poni_file(path: str) -> Dict[str, object]:
 
 def resolve_wavelength(args) -> float:
     if args.wavelength is None and args.energy is None:
-        sys.exit("You must provide either --wavelength (metres) or --energy "
+        _raise_error("You must provide either --wavelength (metres) or --energy "
                   "(keV) -- or use --poni-file to load it from an existing "
                   "calibration file.")
     if args.wavelength is not None:
@@ -604,7 +630,7 @@ def build_detector(args, Detector, detector_factory):
     if args.detector_name:
         return detector_factory(args.detector_name)
     if args.detector_shape is None:
-        sys.exit("You must provide --detector-shape 'height,width' when "
+        _raise_error("You must provide --detector-shape 'height,width' when "
                   "--detector-name is not given (or use --poni-file, which "
                   "already knows the detector's shape).")
     return Detector(
@@ -701,7 +727,7 @@ def run_agbeh_calibration(calib_path: str, detector, wavelength: float,
     from pyFAI.calibrant import get_calibrant
 
     if not os.path.exists(calib_path):
-        sys.exit(f"Calibration image not found: {calib_path}")
+        _raise_error(f"Calibration image not found: {calib_path}")
 
     calib_img = fabio_mod.open(calib_path).data
     calibrant = get_calibrant(calibrant_name, wavelength=wavelength)
@@ -721,7 +747,7 @@ def run_agbeh_calibration(calib_path: str, detector, wavelength: float,
     )
     cp = sg.extract_cp(max_rings=max_rings, Imin=imin)
     if cp is None or len(cp.getList()) == 0:
-        sys.exit(
+        _raise_error(
             f"No calibrant ring control points were found in {calib_path} "
             f"(calibrant='{calibrant_name}', Imin={imin}). Try lowering "
             "--calib-min-intensity, check the calibrant name, or check that "
@@ -767,7 +793,7 @@ def save_refined_poni(path: str, dist: float, poni1: float, poni2: float,
                        rot1: float, rot2: float, rot3: float,
                        wavelength: float, detector):
     if os.path.isdir(path):
-        sys.exit(
+        _raise_error(
             f"--save-calibrated-poni must be a FILE path, not a directory: "
             f"'{path}'. Did you mean a file inside it, e.g. "
             f"'{os.path.join(path, 'calibrated.poni')}'?"
@@ -777,7 +803,7 @@ def save_refined_poni(path: str, dist: float, poni1: float, poni2: float,
 
     parent = os.path.dirname(path)
     if parent and not os.path.isdir(parent):
-        sys.exit(f"Cannot save calibrated .poni file: directory does not "
+        _raise_error(f"Cannot save calibrated .poni file: directory does not "
                   f"exist: '{parent}'")
 
     from pyFAI.geometry import Geometry
@@ -844,7 +870,7 @@ def build_fiber_integrator(args, Detector, detector_factory, FiberIntegrator, fa
                                            ("--beam-center-x", args.beam_center_x),
                                            ("--distance", args.distance)] if val is None]
         if missing:
-            sys.exit(
+            _raise_error(
                 f"Missing required geometry argument(s): {', '.join(missing)}. "
                 f"Either provide these directly, or use --poni-file to load "
                 f"the whole geometry from an existing calibration file."
@@ -991,7 +1017,7 @@ def load_mask(args, fabio, shape) -> np.ndarray:
         mask = fabio.open(args.mask).data
     mask = np.asarray(mask).astype(bool)
     if mask.shape != shape:
-        sys.exit(f"Mask shape {mask.shape} does not match image shape {shape}.")
+        _raise_error(f"Mask shape {mask.shape} does not match image shape {shape}.")
     return mask
 
 
