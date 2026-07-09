@@ -70,6 +70,8 @@ st.session_state.setdefault("processed_2d", None)   # cached heavy-computation r
 st.session_state.setdefault("processed_pf", None)
 st.session_state.setdefault("calibration_confirmed", False)
 st.session_state.setdefault("calibration_diagnostic_path", None)
+st.session_state.setdefault("_2d_zip_bytes", None)
+st.session_state.setdefault("_pf_zip_bytes", None)
 
 # Apply any calibration result from the PREVIOUS run now, before the
 # Geometry section's widgets (beam_center_y/x, distance, rot1-3) are
@@ -758,14 +760,19 @@ with tab_2d:
                 progress_bar.progress((i + 1) / n_files)
             status_text.text(f"Done -- processed {n_files} file(s).")
             st.session_state["processed_2d"] = results
+            st.session_state["_2d_zip_bytes"] = None  # invalidate any stale cached zip
 
     if st.session_state["processed_2d"]:
-        st.download_button(
-            "⬇️ Download ALL 2D images + line cuts (ZIP)",
-            build_2d_results_zip(qip_range, qoop_range),
-            file_name="giwaxs_2d_results.zip", mime="application/zip",
-            key="dl_all_2d_zip",
-        )
+        if st.button("Prepare ZIP of ALL 2D images + line cuts for download", key="prep_2d_zip"):
+            with st.spinner("Building ZIP..."):
+                st.session_state["_2d_zip_bytes"] = build_2d_results_zip(qip_range, qoop_range)
+        if st.session_state.get("_2d_zip_bytes"):
+            st.download_button(
+                "⬇️ Download ALL 2D images + line cuts (ZIP)",
+                st.session_state["_2d_zip_bytes"],
+                file_name="giwaxs_2d_results.zip", mime="application/zip",
+                key="dl_all_2d_zip",
+            )
         for res in st.session_state["processed_2d"]:
             st.markdown(f"#### {res['name']}")
             fig2d = gc.plot_2d_image(
@@ -980,14 +987,24 @@ with tab_pf:
                     progress_bar.progress((i + 1) / n_files)
                 status_text.text(f"Done -- processed {n_files} file(s).")
                 st.session_state["processed_pf"] = results
+                st.session_state["_pf_zip_bytes"] = None  # invalidate any stale cached zip
 
     if st.session_state["processed_pf"]:
-        st.download_button(
-            "⬇️ Download ALL pole figures (ZIP)",
-            build_pf_results_zip(dq, chi_plot_range),
-            file_name="giwaxs_pole_figure_results.zip", mime="application/zip",
-            key="dl_all_pf_zip",
-        )
+        # Two-step (prepare, then download) rather than regenerating the
+        # ZIP inline on every rerun: with many files, rebuilding it from
+        # scratch on EVERY page interaction (even ones unrelated to pole
+        # figures entirely, since Streamlit reruns the whole script on any
+        # widget change) is expensive enough to feel like the app hung.
+        if st.button("Prepare ZIP of ALL pole figures for download", key="prep_pf_zip"):
+            with st.spinner("Building ZIP..."):
+                st.session_state["_pf_zip_bytes"] = build_pf_results_zip(dq, chi_plot_range)
+        if st.session_state.get("_pf_zip_bytes"):
+            st.download_button(
+                "⬇️ Download ALL pole figures (ZIP)",
+                st.session_state["_pf_zip_bytes"],
+                file_name="giwaxs_pole_figure_results.zip", mime="application/zip",
+                key="dl_all_pf_zip",
+            )
         for res in st.session_state["processed_pf"]:
             st.markdown(f"#### {res['name']}")
             for target_q, chi_axis, profile, herman_s in res["per_q"]:
