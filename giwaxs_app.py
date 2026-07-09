@@ -331,7 +331,8 @@ with st.sidebar:
 
     st.header("1. Input")
     uploaded_files = st.file_uploader(
-        "GIWAXS TIFF file(s)", type=["tif", "tiff"], accept_multiple_files=True
+        "GIWAXS TIFF file(s)", type=["tif", "tiff"], accept_multiple_files=True,
+        key="giwaxs_files_upload",
     )
 
     st.header("2. Geometry")
@@ -696,54 +697,66 @@ with tab_2d:
             st.error(f"Geometry error: {err}")
         else:
             results = []
-            for uf in uploaded_files:
-                tmp_path = save_upload_to_temp(uf)
-                img = fabio.open(tmp_path).data
-                mask = np.zeros(img.shape, dtype=bool)
-                if mask_args is not None:
-                    mask = gc.load_mask(mask_args, fabio, img.shape)
+            progress_bar = st.progress(0.0)
+            status_text = st.empty()
+            n_files = len(uploaded_files)
+            for i, uf in enumerate(uploaded_files):
+                status_text.text(f"Processing {uf.name} ({i + 1}/{n_files})...")
+                try:
+                    tmp_path = save_upload_to_temp(uf)
+                    img = fabio.open(tmp_path).data
+                    mask = np.zeros(img.shape, dtype=bool)
+                    if mask_args is not None:
+                        mask = gc.load_mask(mask_args, fabio, img.shape)
 
-                (unit_ip, unit_oop, unit_chi, unit_qtot), angle_deg = units_for_file(
-                    get_unit_fiber, uf.name, verbose=False
-                )
-                if incident_angle_from_filename:
-                    st.caption(f"{uf.name}: using incident angle = {angle_deg} deg")
-
-                res2d = fi.integrate2d_grazing_incidence(
-                    img, npt_ip=int(npt), npt_oop=int(npt),
-                    unit_ip=unit_ip, unit_oop=unit_oop, mask=mask,
-                )
-                res_I, res_qx, res_qy = res2d[0:3]
-                res_qx = -np.flip(res_qx)
-                res_I = np.flip(res_I, axis=1)
-
-                sectors = [(-90, -80), (-8, 8)]
-                for pair in extra_sector_text.split(","):
-                    pair = pair.strip()
-                    if not pair:
-                        continue
-                    try:
-                        a, b = [float(v) for v in pair.split(":")]
-                        sectors.append((a, b))
-                    except ValueError:
-                        st.warning(f"Could not parse sector '{pair}', skipping.")
-
-                linecuts = []
-                incident_angle_rad = np.deg2rad(angle_deg)
-                for angles in sectors:
-                    q, intensity = fi.integrate1d_grazing_incidence(
-                        data=img, incident_angle=incident_angle_rad,
-                        unit_ip=unit_chi, unit_oop=unit_qtot,
-                        npt_oop=int(npt), npt_ip=int(npt),
-                        ip_range=angles, mask=mask,
+                    (unit_ip, unit_oop, unit_chi, unit_qtot), angle_deg = units_for_file(
+                        get_unit_fiber, uf.name, verbose=False
                     )
-                    linecuts.append((angles, q, intensity))
+                    if incident_angle_from_filename:
+                        st.caption(f"{uf.name}: using incident angle = {angle_deg} deg")
 
-                results.append({
-                    "name": os.path.splitext(uf.name)[0],
-                    "res_I": res_I, "res_qx": res_qx, "res_qy": res_qy,
-                    "linecuts": linecuts,
-                })
+                    res2d = fi.integrate2d_grazing_incidence(
+                        img, npt_ip=int(npt), npt_oop=int(npt),
+                        unit_ip=unit_ip, unit_oop=unit_oop, mask=mask,
+                    )
+                    res_I, res_qx, res_qy = res2d[0:3]
+                    res_qx = -np.flip(res_qx)
+                    res_I = np.flip(res_I, axis=1)
+
+                    sectors = [(-90, -80), (-8, 8)]
+                    for pair in extra_sector_text.split(","):
+                        pair = pair.strip()
+                        if not pair:
+                            continue
+                        try:
+                            a, b = [float(v) for v in pair.split(":")]
+                            sectors.append((a, b))
+                        except ValueError:
+                            st.warning(f"Could not parse sector '{pair}', skipping.")
+
+                    linecuts = []
+                    incident_angle_rad = np.deg2rad(angle_deg)
+                    for angles in sectors:
+                        q, intensity = fi.integrate1d_grazing_incidence(
+                            data=img, incident_angle=incident_angle_rad,
+                            unit_ip=unit_chi, unit_oop=unit_qtot,
+                            npt_oop=int(npt), npt_ip=int(npt),
+                            ip_range=angles, mask=mask,
+                        )
+                        linecuts.append((angles, q, intensity))
+
+                    results.append({
+                        "name": os.path.splitext(uf.name)[0],
+                        "res_I": res_I, "res_qx": res_qx, "res_qy": res_qy,
+                        "linecuts": linecuts,
+                    })
+                except Exception as exc:
+                    # One bad file (unexpected format, geometry mismatch, a
+                    # pyFAI-internal error, ...) shouldn't take down the
+                    # whole batch that's already been waiting on this run.
+                    st.error(f"Failed to process {uf.name}: {exc}")
+                progress_bar.progress((i + 1) / n_files)
+            status_text.text(f"Done -- processed {n_files} file(s).")
             st.session_state["processed_2d"] = results
 
     if st.session_state["processed_2d"]:
@@ -909,48 +922,63 @@ with tab_pf:
                 st.error(f"Geometry error: {err}")
             else:
                 results = []
-                for uf in uploaded_files:
+                progress_bar = st.progress(0.0)
+                status_text = st.empty()
+                n_files = len(uploaded_files)
+                for i, uf in enumerate(uploaded_files):
+                    status_text.text(f"Processing {uf.name} ({i + 1}/{n_files})...")
                     target_qs = q_per_file.get(uf.name, [])
                     if not target_qs:
                         st.warning(f"Skipping {uf.name}: no target q value(s) given.")
+                        progress_bar.progress((i + 1) / n_files)
                         continue
 
-                    tmp_path = save_upload_to_temp(uf)
-                    img = fabio.open(tmp_path).data
-                    mask = np.zeros(img.shape, dtype=bool)
-                    if mask_args is not None:
-                        mask = gc.load_mask(mask_args, fabio, img.shape)
+                    try:
+                        tmp_path = save_upload_to_temp(uf)
+                        img = fabio.open(tmp_path).data
+                        mask = np.zeros(img.shape, dtype=bool)
+                        if mask_args is not None:
+                            mask = gc.load_mask(mask_args, fabio, img.shape)
 
-                    (_, _, unit_chi, unit_qtot), angle_deg = units_for_file(
-                        get_unit_fiber, uf.name, verbose=False
-                    )
-                    if incident_angle_from_filename:
-                        st.caption(f"{uf.name}: using incident angle = {angle_deg} deg")
+                        (_, _, unit_chi, unit_qtot), angle_deg = units_for_file(
+                            get_unit_fiber, uf.name, verbose=False
+                        )
+                        if incident_angle_from_filename:
+                            st.caption(f"{uf.name}: using incident angle = {angle_deg} deg")
 
-                    per_q = []
-                    for target_q in target_qs:
-                        try:
-                            chi_axis, profile = gc.compute_chi_profile_at_q(
-                                fi, img, mask, target_q, dq, int(npt), unit_chi, unit_qtot,
-                            )
-                        except ValueError as exc:
-                            st.warning(f"{uf.name} @ q={target_q}: {exc}")
-                            continue
-                        herman_s = None
-                        if compute_herman:
+                        per_q = []
+                        for target_q in target_qs:
                             try:
-                                herman_s, mean_cos2, coverage = gc.compute_herman_orientation(
-                                    chi_axis, profile, chi_max=chi_max
+                                chi_axis, profile = gc.compute_chi_profile_at_q(
+                                    fi, img, mask, target_q, dq, int(npt), unit_chi, unit_qtot,
                                 )
-                                if coverage < 0.5:
-                                    st.warning(
-                                        f"{uf.name} @ q={target_q}: low angular coverage "
-                                        f"({coverage*100:.0f}%) -- treat S with caution."
+                            except Exception as exc:
+                                # Broad catch (not just ValueError) -- pyFAI's own
+                                # C-extension calls can raise other exception
+                                # types too, and one bad file/q value should
+                                # skip gracefully rather than crash the WHOLE
+                                # batch that's already been waiting on this run.
+                                st.warning(f"{uf.name} @ q={target_q}: {exc}")
+                                continue
+                            herman_s = None
+                            if compute_herman:
+                                try:
+                                    herman_s, mean_cos2, coverage = gc.compute_herman_orientation(
+                                        chi_axis, profile, chi_max=chi_max
                                     )
-                            except ValueError as exc:
-                                st.warning(f"Could not compute Herman's S: {exc}")
-                        per_q.append((target_q, chi_axis, profile, herman_s))
-                    results.append({"name": os.path.splitext(uf.name)[0], "per_q": per_q})
+                                    if coverage < 0.5:
+                                        st.warning(
+                                            f"{uf.name} @ q={target_q}: low angular coverage "
+                                            f"({coverage*100:.0f}%) -- treat S with caution."
+                                        )
+                                except Exception as exc:
+                                    st.warning(f"Could not compute Herman's S: {exc}")
+                            per_q.append((target_q, chi_axis, profile, herman_s))
+                        results.append({"name": os.path.splitext(uf.name)[0], "per_q": per_q})
+                    except Exception as exc:
+                        st.error(f"Failed to process {uf.name}: {exc}")
+                    progress_bar.progress((i + 1) / n_files)
+                status_text.text(f"Done -- processed {n_files} file(s).")
                 st.session_state["processed_pf"] = results
 
     if st.session_state["processed_pf"]:
