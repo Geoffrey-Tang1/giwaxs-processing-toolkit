@@ -72,6 +72,8 @@ st.session_state.setdefault("calibration_confirmed", False)
 st.session_state.setdefault("calibration_diagnostic_path", None)
 st.session_state.setdefault("_2d_zip_bytes", None)
 st.session_state.setdefault("_pf_zip_bytes", None)
+st.session_state.setdefault("_2d_plot_png_cache", {})
+st.session_state.setdefault("_pf_plot_png_cache", {})
 
 # Apply any calibration result from the PREVIOUS run now, before the
 # Geometry section's widgets (beam_center_y/x, distance, rot1-3) are
@@ -761,6 +763,7 @@ with tab_2d:
             status_text.text(f"Done -- processed {n_files} file(s).")
             st.session_state["processed_2d"] = results
             st.session_state["_2d_zip_bytes"] = None  # invalidate any stale cached zip
+            st.session_state["_2d_plot_png_cache"] = {}  # invalidate any stale cached images
 
     if st.session_state["processed_2d"]:
         if st.button("Prepare ZIP of ALL 2D images + line cuts for download", key="prep_2d_zip"):
@@ -773,47 +776,71 @@ with tab_2d:
                 file_name="giwaxs_2d_results.zip", mime="application/zip",
                 key="dl_all_2d_zip",
             )
+        d2_plot_cache = st.session_state.setdefault("_2d_plot_png_cache", {})
         for res in st.session_state["processed_2d"]:
             st.markdown(f"#### {res['name']}")
-            fig2d = gc.plot_2d_image(
-                res["res_qx"], res["res_qy"], res["res_I"],
-                out_path=None, qlim_x=qip_range, qlim_y=qoop_range,
-                vmin_percentile=st.session_state["2d_vmin_percentile"],
-                vmax_percentile=st.session_state.get("2d_vmax_percentile", 99.9),
-                cmap=st.session_state["2d_cmap"],
-                vmin=st.session_state["2d_vmin"] if st.session_state["2d_use_manual_scale"] else None,
-                vmax=st.session_state["2d_vmax"] if st.session_state["2d_use_manual_scale"] else None,
-                font_family=st.session_state["2d_font_family"],
-                font_size=st.session_state["2d_font_size"],
-                axis_label_style=st.session_state["2d_axis_labels"],
+            img_cache_key = (
+                res["name"], qip_range, qoop_range,
+                st.session_state["2d_vmin_percentile"],
+                st.session_state.get("2d_vmax_percentile", 99.9),
+                st.session_state["2d_cmap"],
+                st.session_state["2d_vmin"] if st.session_state["2d_use_manual_scale"] else None,
+                st.session_state["2d_vmax"] if st.session_state["2d_use_manual_scale"] else None,
+                st.session_state["2d_font_family"], st.session_state["2d_font_size"],
+                st.session_state["2d_axis_labels"], st.session_state["2d_dpi"],
             )
+            if img_cache_key not in d2_plot_cache:
+                fig2d = gc.plot_2d_image(
+                    res["res_qx"], res["res_qy"], res["res_I"],
+                    out_path=None, qlim_x=qip_range, qlim_y=qoop_range,
+                    vmin_percentile=st.session_state["2d_vmin_percentile"],
+                    vmax_percentile=st.session_state.get("2d_vmax_percentile", 99.9),
+                    cmap=st.session_state["2d_cmap"],
+                    vmin=st.session_state["2d_vmin"] if st.session_state["2d_use_manual_scale"] else None,
+                    vmax=st.session_state["2d_vmax"] if st.session_state["2d_use_manual_scale"] else None,
+                    font_family=st.session_state["2d_font_family"],
+                    font_size=st.session_state["2d_font_size"],
+                    axis_label_style=st.session_state["2d_axis_labels"],
+                )
+                buf = io.BytesIO()
+                fig2d.savefig(buf, format="png", dpi=st.session_state["2d_dpi"])
+                plt.close(fig2d)
+                d2_plot_cache[img_cache_key] = buf.getvalue()
+            png_bytes_2d = d2_plot_cache[img_cache_key]
+
             c1, c2 = st.columns([2, 1])
             with c1:
-                st.pyplot(fig2d)
-            buf = io.BytesIO()
-            fig2d.savefig(buf, format="png", dpi=st.session_state["2d_dpi"])
-            plt.close(fig2d)
-            c2.download_button("Download 2D image PNG", buf.getvalue(),
+                st.image(png_bytes_2d)
+            c2.download_button("Download 2D image PNG", png_bytes_2d,
                                 file_name=f"{res['name']}_2D_GIWAXS.png", mime="image/png",
                                 key=f"dl2d_{res['name']}")
 
             for angles, q, intensity in res["linecuts"]:
-                fig1d = gc.plot_1d_linecut(
-                    q, intensity, out_path=None, angle_range=angles,
-                    title=f"{res['name']}: {angles} deg",
-                    line_color=st.session_state["2d_line_color"],
-                    font_family=st.session_state["2d_font_family"],
-                    font_size=st.session_state["2d_font_size"],
+                lc_cache_key = (
+                    res["name"], angles, st.session_state["2d_line_color"],
+                    st.session_state["2d_font_family"], st.session_state["2d_font_size"],
+                    st.session_state["2d_dpi"],
                 )
+                if lc_cache_key not in d2_plot_cache:
+                    fig1d = gc.plot_1d_linecut(
+                        q, intensity, out_path=None, angle_range=angles,
+                        title=f"{res['name']}: {angles} deg",
+                        line_color=st.session_state["2d_line_color"],
+                        font_family=st.session_state["2d_font_family"],
+                        font_size=st.session_state["2d_font_size"],
+                    )
+                    buf2 = io.BytesIO()
+                    fig1d.savefig(buf2, format="png", dpi=st.session_state["2d_dpi"])
+                    plt.close(fig1d)
+                    d2_plot_cache[lc_cache_key] = buf2.getvalue()
+                png_bytes_lc = d2_plot_cache[lc_cache_key]
+
                 lc1, lc2 = st.columns([2, 1])
                 with lc1:
-                    st.pyplot(fig1d)
-                buf2 = io.BytesIO()
-                fig1d.savefig(buf2, format="png", dpi=st.session_state["2d_dpi"])
-                plt.close(fig1d)
+                    st.image(png_bytes_lc)
                 tag = f"{angles[0]}_{angles[1]}".replace("-", "m").replace(".", "p")
                 lc2.download_button(
-                    f"Download line cut {angles} PNG", buf2.getvalue(),
+                    f"Download line cut {angles} PNG", png_bytes_lc,
                     file_name=f"{res['name']}_lineprofile_{tag}.png", mime="image/png",
                     key=f"dl1d_{res['name']}_{tag}",
                 )
@@ -988,6 +1015,7 @@ with tab_pf:
                 status_text.text(f"Done -- processed {n_files} file(s).")
                 st.session_state["processed_pf"] = results
                 st.session_state["_pf_zip_bytes"] = None  # invalidate any stale cached zip
+                st.session_state["_pf_plot_png_cache"] = {}  # invalidate any stale cached images
 
     if st.session_state["processed_pf"]:
         # Two-step (prepare, then download) rather than regenerating the
@@ -1005,27 +1033,42 @@ with tab_pf:
                 file_name="giwaxs_pole_figure_results.zip", mime="application/zip",
                 key="dl_all_pf_zip",
             )
+        pf_plot_cache = st.session_state.setdefault("_pf_plot_png_cache", {})
         for res in st.session_state["processed_pf"]:
             st.markdown(f"#### {res['name']}")
             for target_q, chi_axis, profile, herman_s in res["per_q"]:
-                fig = gc.plot_chi_intensity_profile(
-                    chi_axis, profile, out_path=None, target_q=target_q, dq=dq,
-                    title=res["name"], herman_s=herman_s, chi_range=chi_plot_range,
-                    line_color=st.session_state["pf_line_color"],
-                    font_family=st.session_state["pf_font_family"],
-                    font_size=st.session_state["pf_font_size"],
+                cache_key = (
+                    res["name"], target_q, dq, chi_plot_range,
+                    st.session_state["pf_line_color"], st.session_state["pf_font_family"],
+                    st.session_state["pf_font_size"], st.session_state["pf_dpi"],
                 )
+                if cache_key not in pf_plot_cache:
+                    # Cache miss -- data OR style actually changed for this
+                    # specific plot, so (and only so) actually re-render it.
+                    # An unrelated rerun (e.g. editing a different row in the
+                    # q-value table) hits the cache instead of re-invoking
+                    # matplotlib for every already-rendered plot every time.
+                    fig = gc.plot_chi_intensity_profile(
+                        chi_axis, profile, out_path=None, target_q=target_q, dq=dq,
+                        title=res["name"], herman_s=herman_s, chi_range=chi_plot_range,
+                        line_color=st.session_state["pf_line_color"],
+                        font_family=st.session_state["pf_font_family"],
+                        font_size=st.session_state["pf_font_size"],
+                    )
+                    buf = io.BytesIO()
+                    fig.savefig(buf, format="png", dpi=st.session_state["pf_dpi"])
+                    plt.close(fig)
+                    pf_plot_cache[cache_key] = buf.getvalue()
+                png_bytes = pf_plot_cache[cache_key]
+
                 pc1, pc2 = st.columns([2, 1])
                 with pc1:
-                    st.pyplot(fig)
+                    st.image(png_bytes)
                 if herman_s is not None:
                     pc2.metric("Herman's S", f"{herman_s:.3f}")
-                buf = io.BytesIO()
-                fig.savefig(buf, format="png", dpi=st.session_state["pf_dpi"])
-                plt.close(fig)
                 q_tag = f"{target_q:.3f}".replace(".", "p")
                 pc2.download_button(
-                    "Download PNG", buf.getvalue(),
+                    "Download PNG", png_bytes,
                     file_name=f"{res['name']}_polefigure_q{q_tag}.png", mime="image/png",
                     key=f"dlpf_{res['name']}_{q_tag}",
                 )
