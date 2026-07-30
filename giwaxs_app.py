@@ -66,6 +66,11 @@ STYLE_DEFAULTS = {
 for prefix in ("2d_", "pf_"):
     for k, v in STYLE_DEFAULTS.items():
         st.session_state.setdefault(prefix + k, v)
+# Tick spacing defaults differ per tab/plot-type (matching each one's own
+# established default), so these can't go through the uniform loop above.
+st.session_state.setdefault("2d_tick_spacing", 0.5)            # 2D image, 1/A
+st.session_state.setdefault("2d_linecut_tick_spacing", 0.3)    # line cuts, 1/A
+st.session_state.setdefault("pf_tick_spacing", 20.0)           # pole figure chi axis, deg
 st.session_state.setdefault("processed_2d", None)   # cached heavy-computation results
 st.session_state.setdefault("processed_pf", None)
 st.session_state.setdefault("calibration_confirmed", False)
@@ -211,6 +216,7 @@ def build_2d_results_zip(qip_range, qoop_range) -> bytes:
                 font_family=st.session_state["2d_font_family"],
                 font_size=st.session_state["2d_font_size"],
                 axis_label_style=st.session_state["2d_axis_labels"],
+                tick_spacing=st.session_state["2d_tick_spacing"],
             )
             img_buf = io.BytesIO()
             fig2d.savefig(img_buf, format="png", dpi=st.session_state["2d_dpi"])
@@ -225,6 +231,7 @@ def build_2d_results_zip(qip_range, qoop_range) -> bytes:
                     line_color=st.session_state["2d_line_color"],
                     font_family=st.session_state["2d_font_family"],
                     font_size=st.session_state["2d_font_size"],
+                    tick_spacing=st.session_state["2d_linecut_tick_spacing"],
                 )
                 lc_buf = io.BytesIO()
                 fig1d.savefig(lc_buf, format="png", dpi=st.session_state["2d_dpi"])
@@ -256,6 +263,7 @@ def build_pf_results_zip(dq, chi_plot_range) -> bytes:
                     line_color=st.session_state["pf_line_color"],
                     font_family=st.session_state["pf_font_family"],
                     font_size=st.session_state["pf_font_size"],
+                    tick_spacing=st.session_state["pf_tick_spacing"],
                 )
                 img_buf = io.BytesIO()
                 fig.savefig(img_buf, format="png", dpi=st.session_state["pf_dpi"])
@@ -662,6 +670,19 @@ def style_widgets(show_cmap: bool, show_sector_color: bool, key_prefix: str):
                 format_func=lambda v: "q_ip / q_oop" if v == "ip_oop" else "q_xy / q_z",
             )
 
+    cols3 = st.columns(2)
+    if show_cmap:
+        with cols3[0]:
+            st.number_input("2D image tick spacing (1/Å)", min_value=0.01, step=0.05,
+                             key=f"{p}_tick_spacing", format="%.2f")
+        with cols3[1]:
+            st.number_input("Line cut tick spacing (1/Å)", min_value=0.01, step=0.05,
+                             key=f"{p}_linecut_tick_spacing", format="%.2f")
+    else:
+        with cols3[0]:
+            st.number_input("Chi axis tick spacing (deg)", min_value=1.0, step=5.0,
+                             key=f"{p}_tick_spacing", format="%.1f")
+
     st.checkbox("Set explicit colour-scale range (instead of automatic percentile)",
                 key=f"{p}_use_manual_scale")
     if st.session_state[f"{p}_use_manual_scale"]:
@@ -788,6 +809,7 @@ with tab_2d:
                 st.session_state["2d_vmax"] if st.session_state["2d_use_manual_scale"] else None,
                 st.session_state["2d_font_family"], st.session_state["2d_font_size"],
                 st.session_state["2d_axis_labels"], st.session_state["2d_dpi"],
+                st.session_state["2d_tick_spacing"],
             )
             if img_cache_key not in d2_plot_cache:
                 fig2d = gc.plot_2d_image(
@@ -801,6 +823,7 @@ with tab_2d:
                     font_family=st.session_state["2d_font_family"],
                     font_size=st.session_state["2d_font_size"],
                     axis_label_style=st.session_state["2d_axis_labels"],
+                    tick_spacing=st.session_state["2d_tick_spacing"],
                 )
                 buf = io.BytesIO()
                 fig2d.savefig(buf, format="png", dpi=st.session_state["2d_dpi"])
@@ -819,7 +842,7 @@ with tab_2d:
                 lc_cache_key = (
                     res["name"], angles, st.session_state["2d_line_color"],
                     st.session_state["2d_font_family"], st.session_state["2d_font_size"],
-                    st.session_state["2d_dpi"],
+                    st.session_state["2d_dpi"], st.session_state["2d_linecut_tick_spacing"],
                 )
                 if lc_cache_key not in d2_plot_cache:
                     fig1d = gc.plot_1d_linecut(
@@ -828,6 +851,7 @@ with tab_2d:
                         line_color=st.session_state["2d_line_color"],
                         font_family=st.session_state["2d_font_family"],
                         font_size=st.session_state["2d_font_size"],
+                        tick_spacing=st.session_state["2d_linecut_tick_spacing"],
                     )
                     buf2 = io.BytesIO()
                     fig1d.savefig(buf2, format="png", dpi=st.session_state["2d_dpi"])
@@ -1041,6 +1065,7 @@ with tab_pf:
                     res["name"], target_q, dq, chi_plot_range,
                     st.session_state["pf_line_color"], st.session_state["pf_font_family"],
                     st.session_state["pf_font_size"], st.session_state["pf_dpi"],
+                    st.session_state["pf_tick_spacing"],
                 )
                 if cache_key not in pf_plot_cache:
                     # Cache miss -- data OR style actually changed for this
@@ -1054,6 +1079,7 @@ with tab_pf:
                         line_color=st.session_state["pf_line_color"],
                         font_family=st.session_state["pf_font_family"],
                         font_size=st.session_state["pf_font_size"],
+                        tick_spacing=st.session_state["pf_tick_spacing"],
                     )
                     buf = io.BytesIO()
                     fig.savefig(buf, format="png", dpi=st.session_state["pf_dpi"])
