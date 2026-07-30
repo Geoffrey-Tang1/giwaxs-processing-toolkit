@@ -7,3 +7,5 @@ fastapi
 uvicorn[standard]
 python-multipart
 anthropic
+openai
+google-genai
