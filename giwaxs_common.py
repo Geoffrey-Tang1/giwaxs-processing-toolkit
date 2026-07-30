@@ -1549,3 +1549,214 @@ def append_herman_summary_row(summary_path: str, row: Dict[str, object]):
         if not file_exists:
             writer.writeheader()
         writer.writerow(row)
+
+
+# --------------------------------------------------------------------------- #
+# Peak fitting (line-cut peak shape -> q0, FWHM, d-spacing, coherence length)
+# --------------------------------------------------------------------------- #
+_FWHM_TO_SIGMA = 2.0 * np.sqrt(2.0 * np.log(2.0))  # ~2.3548
+
+
+def fit_peak(q, intensity, q_min: float, q_max: float,
+             shape: str = "gaussian", scherrer_k: float = 0.9,
+             label: str = "") -> Dict[str, object]:
+    """Fit a single diffraction peak within [q_min, q_max] (1/Angstrom) to
+    a peak profile plus a linear background, via nonlinear least squares.
+
+    shape: "gaussian", "lorentzian", or "pseudo_voigt" (a linear blend of
+    the two, with the blend fraction eta also fit).
+
+    Returns a dict with:
+      q0                 fitted peak centre (1/A)
+      fwhm                fitted full-width-at-half-max (1/A)
+      d_spacing           2*pi/q0 (Angstrom) -- real-space periodicity
+      coherence_length    2*pi*K/FWHM (Angstrom), the Scherrer equation in
+                           q-space (K=0.9 by default) -- see e.g. Savikhin
+                           & Toney, "Fundamentals of Organic Semiconductor
+                           Device Physics" / Handbook of Organic Materials
+                           for Electronic and Photonic Devices, for this
+                           q-space formulation, or countless GIWAXS papers'
+                           SI sections using the identical CL = 2*pi*K/FWHM.
+      peak_intensity       fitted peak height ABOVE the local background
+      peak_area            integrated area of the background-subtracted peak
+      r_squared            goodness of fit over the fit window (1 = perfect)
+      eta                  Gaussian/Lorentzian blend fraction (pseudo_voigt only)
+      fit_curve_q/I         dense arrays (peak + background) for overlay plotting
+      background_curve_I    the background component alone, same q as fit_curve_q
+      label, q_range, shape, scherrer_k   echoed back for convenience
+
+    Raises GiwaxsError (not a bare exception) if the window has too few
+    points or the fit fails to converge, so this is safe to call from the
+    Streamlit app's normal `except Exception` handling without special-casing.
+    """
+    from scipy.optimize import curve_fit
+
+    if shape not in ("gaussian", "lorentzian", "pseudo_voigt", "voigt"):
+        raise GiwaxsError(
+            f"Unknown peak shape '{shape}' -- use 'gaussian', 'lorentzian', or 'pseudo_voigt'."
+        )
+    is_voigt = shape in ("pseudo_voigt", "voigt")
+
+    q = np.asarray(q, dtype=float)
+    intensity = np.asarray(intensity, dtype=float)
+    mask = (q >= q_min) & (q <= q_max) & np.isfinite(q) & np.isfinite(intensity)
+    q_fit = q[mask]
+    I_fit = intensity[mask]
+    if len(q_fit) < 6:
+        raise GiwaxsError(
+            f"Not enough data points in range [{q_min:.4g}, {q_max:.4g}] 1/A "
+            f"to fit a peak (found {len(q_fit)}, need at least 6). Check the "
+            f"range actually falls within this line cut's q coverage."
+        )
+    order = np.argsort(q_fit)  # defensive -- should already be sorted
+    q_fit, I_fit = q_fit[order], I_fit[order]
+
+    q_span = q_max - q_min
+    q_center = float(q_fit.mean())  # background defined relative to this for numerical stability
+    edge_n = max(1, len(q_fit) // 8)
+    bg_left, bg_right = float(np.median(I_fit[:edge_n])), float(np.median(I_fit[-edge_n:]))
+    bg0 = (bg_left + bg_right) / 2
+    slope0 = (bg_right - bg_left) / (q_fit[-1] - q_fit[0]) if q_fit[-1] != q_fit[0] else 0.0
+
+    def background(qv, bg, slope):
+        return bg + slope * (qv - q_center)
+
+    peak_idx = int(np.argmax(I_fit - background(q_fit, bg0, slope0)))
+    q0_0 = float(q_fit[peak_idx])
+    amp0 = max(float(I_fit[peak_idx] - background(q0_0, bg0, slope0)), 1e-6)
+    fwhm0 = q_span / 3
+
+    def _gaussian(qv, amp, q0, fwhm):
+        sigma = abs(fwhm) / _FWHM_TO_SIGMA
+        return amp * np.exp(-0.5 * ((qv - q0) / sigma) ** 2)
+
+    def _lorentzian(qv, amp, q0, fwhm):
+        gamma = abs(fwhm) / 2
+        return amp * gamma ** 2 / ((qv - q0) ** 2 + gamma ** 2)
+
+    if shape == "gaussian":
+        peak_fn = _gaussian
+    elif shape == "lorentzian":
+        peak_fn = _lorentzian
+    else:  # pseudo_voigt
+        def peak_fn(qv, amp, q0, fwhm, eta):
+            return amp * (eta * _lorentzian(qv, 1.0, q0, fwhm)
+                           + (1 - eta) * _gaussian(qv, 1.0, q0, fwhm))
+
+    if is_voigt:
+        def model(qv, amp, q0, fwhm, eta, bg, slope):
+            return peak_fn(qv, amp, q0, fwhm, eta) + background(qv, bg, slope)
+        p0 = [amp0, q0_0, fwhm0, 0.5, bg0, slope0]
+        bounds = ([0, q_min, 1e-6, 0, -np.inf, -np.inf],
+                  [np.inf, q_max, q_span * 3, 1, np.inf, np.inf])
+    else:
+        def model(qv, amp, q0, fwhm, bg, slope):
+            return peak_fn(qv, amp, q0, fwhm) + background(qv, bg, slope)
+        p0 = [amp0, q0_0, fwhm0, bg0, slope0]
+        bounds = ([0, q_min, 1e-6, -np.inf, -np.inf],
+                  [np.inf, q_max, q_span * 3, np.inf, np.inf])
+
+    try:
+        popt, _ = curve_fit(model, q_fit, I_fit, p0=p0, bounds=bounds, maxfev=10000)
+    except Exception as exc:
+        raise GiwaxsError(
+            f"Peak fit did not converge for range [{q_min:.4g}, {q_max:.4g}] "
+            f"1/A{f' ({label})' if label else ''}: {exc}"
+        )
+
+    if is_voigt:
+        amp, q0, fwhm, eta, bg, slope = popt
+    else:
+        amp, q0, fwhm, bg, slope = popt
+        eta = None
+    fwhm = abs(fwhm)
+
+    I_model = model(q_fit, *popt)
+    ss_res = float(np.sum((I_fit - I_model) ** 2))
+    ss_tot = float(np.sum((I_fit - I_fit.mean()) ** 2))
+    r_squared = 1 - ss_res / ss_tot if ss_tot > 0 else float("nan")
+
+    d_spacing = 2 * np.pi / q0 if q0 > 0 else float("nan")
+    coherence_length = 2 * np.pi * scherrer_k / fwhm if fwhm > 0 else float("nan")
+
+    q_dense = np.linspace(q_min, q_max, 2000)
+    peak_dense = peak_fn(q_dense, amp, q0, fwhm, eta) if is_voigt else peak_fn(q_dense, amp, q0, fwhm)
+    peak_area = float(_trapz(peak_dense, q_dense))
+    bg_dense = background(q_dense, bg, slope)
+
+    return {
+        "label": label, "q_range": (q_min, q_max), "shape": shape,
+        "q0": float(q0), "fwhm": float(fwhm), "d_spacing": float(d_spacing),
+        "coherence_length": float(coherence_length),
+        "peak_intensity": float(amp), "peak_area": peak_area,
+        "eta": float(eta) if eta is not None else None,
+        "background_level": float(bg), "background_slope": float(slope),
+        "r_squared": float(r_squared), "scherrer_k": scherrer_k,
+        "fit_curve_q": q_dense, "fit_curve_I": peak_dense + bg_dense,
+        "background_curve_I": bg_dense,
+    }
+
+
+def fit_multiple_peaks(q, intensity, regions, shape: str = "gaussian",
+                        scherrer_k: float = 0.9) -> List[Dict[str, object]]:
+    """Fit each (q_min, q_max, label) tuple in `regions` independently via
+    fit_peak(). Returns a list of result dicts (see fit_peak's docstring),
+    in the same order as `regions`. A region that fails to fit raises
+    GiwaxsError with that region's label/range in the message (from
+    fit_peak itself) -- callers doing batch/UI work typically want to
+    catch per-region so one bad region doesn't lose the others; this
+    function itself does NOT catch, so it fails fast for simple/scripted use.
+    """
+    return [
+        fit_peak(q, intensity, q_min, q_max, shape=shape, scherrer_k=scherrer_k, label=label)
+        for (q_min, q_max, label) in regions
+    ]
+
+
+def plot_linecut_with_fits(q, intensity, fits: List[Dict[str, object]], out_path=None,
+                            title: Optional[str] = None, line_color: Optional[str] = None,
+                            font_family: Optional[str] = None, font_size: Optional[float] = None,
+                            dpi: int = DEFAULT_DPI, figsize: Tuple[float, float] = DEFAULT_FIGSIZE,
+                            q_range: Optional[Tuple[float, float]] = None,
+                            tick_spacing: Optional[float] = 0.3):
+    """Plot a 1D line-cut curve with one or more fitted peaks (each a dict
+    from fit_peak/fit_multiple_peaks) overlaid: the fitted model curve
+    drawn on top of the raw data, the fit window lightly shaded, and the
+    fitted peak centre marked with a vertical line -- so fit quality can
+    be judged visually at a glance. `fits` may be an empty list (just
+    shows the raw data, e.g. before any fitting has been done yet).
+    """
+    with style_context(font_family, font_size):
+        fig, ax = plt.subplots(1, 1, figsize=figsize)
+        ax.plot(q, intensity, linewidth=1.0, color=line_color or "#1f77b4",
+                label="data", zorder=2, alpha=0.85)
+
+        color_cycle = plt.rcParams["axes.prop_cycle"].by_key().get(
+            "color", ["#d62728", "#2ca02c", "#9467bd", "#8c564b", "#e377c2"]
+        )
+        for i, fit in enumerate(fits):
+            c = color_cycle[i % len(color_cycle)]
+            q_min, q_max = fit["q_range"]
+            label = fit.get("label") or f"peak {i + 1}"
+            ax.axvspan(q_min, q_max, alpha=0.08, color=c, zorder=0)
+            ax.plot(fit["fit_curve_q"], fit["fit_curve_I"], color=c, linewidth=1.6,
+                     linestyle="--", zorder=3, label=f"{label} fit")
+            ax.axvline(fit["q0"], color=c, linewidth=0.7, linestyle=":", alpha=0.7, zorder=1)
+
+        ax.set_xlabel(r"q (Å$^{-1}$)")
+        ax.set_ylabel("Intensity (a.u.)")
+        ax.set_yscale("log")
+        if q_range:
+            ax.set_xlim(q_range)
+        if tick_spacing:
+            ax.xaxis.set_major_locator(MultipleLocator(tick_spacing))
+        if fits:
+            ax.legend(fontsize=8, loc="best", framealpha=0.85)
+        if title:
+            ax.set_title(title, fontsize=10)
+        fig.tight_layout()
+        if out_path:
+            fig.savefig(out_path, dpi=dpi)
+            plt.close(fig)
+            return None
+        return fig
