@@ -2,6 +2,7 @@ numpy
 matplotlib
 pyFAI
 fabio
+scipy
 streamlit
 pandas
 anthropic
