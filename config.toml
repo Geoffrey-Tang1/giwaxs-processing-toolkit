@@ -1,0 +1,11 @@
+[server]
+# How often (seconds) the server pings the browser to keep the WebSocket
+# connection alive. Streamlit's default is 30s; Streamlit Community Cloud
+# sits behind a proxy/load balancer, and a more frequent ping makes the
+# connection look "active" to that proxy more often, reducing the chance
+# it gets treated as idle and dropped (which shows up as: typing getting
+# interrupted, uploaded files disappearing, or session_state resetting
+# mid-session, since a dropped WebSocket wipes st.session_state).
+# If this doesn't help, it can be safely removed -- worst case, more
+# frequent pings only cost a negligible amount of network traffic.
+websocketPingInterval = 10
