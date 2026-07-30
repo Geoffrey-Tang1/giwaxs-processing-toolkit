@@ -70,6 +70,7 @@ for prefix in ("2d_", "pf_"):
 # established default), so these can't go through the uniform loop above.
 st.session_state.setdefault("2d_tick_spacing", 0.5)            # 2D image, 1/A
 st.session_state.setdefault("2d_linecut_tick_spacing", 0.3)    # line cuts, 1/A
+st.session_state.setdefault("2d_subtick_spacing", 0.0)         # 2D image minor ticks, 1/A -- 0 = off
 st.session_state.setdefault("pf_tick_spacing", 20.0)           # pole figure chi axis, deg
 st.session_state.setdefault("processed_2d", None)   # cached heavy-computation results
 st.session_state.setdefault("processed_pf", None)
@@ -96,7 +97,126 @@ if _pending_calib:
 
 
 # --------------------------------------------------------------------------- #
-# AI style assistant (optional -- needs an Anthropic API key)
+# AI provider configuration -- centralized, backend-configured (via Streamlit
+# secrets or environment variables), NOT entered by each user in the UI.
+#
+# To enable AI features, whoever DEPLOYS this app adds ONE of these to the
+# app's Secrets (Streamlit Cloud: app settings -> Secrets; locally: a
+# .streamlit/secrets.toml file) or as an environment variable:
+#   ANTHROPIC_API_KEY = "sk-ant-..."     (Claude)
+#   OPENAI_API_KEY    = "sk-..."         (GPT)
+#   GOOGLE_API_KEY     = "AI..."          (Gemini)
+# Checked in that order; the first one found is used for every AI feature
+# in the app for every visitor -- individual users never enter a key.
+#
+# Model names below are a moving target (all three vendors ship new models
+# every few months) -- these are reasonable choices as of when this was
+# written, but update them freely if a vendor's current lineup has moved on;
+# each can also be overridden without a code change via an optional secret/
+# env var of the same name (e.g. ANTHROPIC_MODEL, OPENAI_MODEL, GOOGLE_MODEL).
+# --------------------------------------------------------------------------- #
+AI_PROVIDERS = [
+    {"name": "Claude (Anthropic)", "key_name": "ANTHROPIC_API_KEY",
+     "model_name": "ANTHROPIC_MODEL", "default_model": "claude-sonnet-4-6"},
+    {"name": "GPT (OpenAI)", "key_name": "OPENAI_API_KEY",
+     "model_name": "OPENAI_MODEL", "default_model": "gpt-5.5"},
+    {"name": "Gemini (Google)", "key_name": "GOOGLE_API_KEY",
+     "model_name": "GOOGLE_MODEL", "default_model": "gemini-2.5-flash"},
+]
+
+
+def _get_secret_or_env(name: str) -> Optional[str]:
+    try:
+        if name in st.secrets:
+            return st.secrets[name]
+    except Exception:
+        pass  # no secrets.toml at all -- st.secrets access can raise in that case
+    return os.environ.get(name)
+
+
+def get_configured_ai_provider() -> Optional[dict]:
+    """Return the config dict (from AI_PROVIDERS) for the first provider
+    that has an API key configured via secrets/env, with its resolved
+    api_key and model filled in -- or None if nothing is configured.
+    """
+    for provider in AI_PROVIDERS:
+        api_key = _get_secret_or_env(provider["key_name"])
+        if api_key:
+            model = _get_secret_or_env(provider["model_name"]) or provider["default_model"]
+            return {**provider, "api_key": api_key, "model": model}
+    return None
+
+
+def call_ai(system_prompt: str, user_message: str, max_tokens: int = 1000) -> str:
+    """Call whichever AI provider is configured (see get_configured_ai_provider),
+    returning the raw text response. Raises RuntimeError if nothing is
+    configured, or whatever the provider's own SDK raises on failure --
+    caller should catch and show a friendly error either way.
+    """
+    provider = get_configured_ai_provider()
+    if provider is None:
+        raise RuntimeError(
+            "No AI provider is configured for this app. Ask whoever "
+            "deployed it to add an API key (ANTHROPIC_API_KEY, "
+            "OPENAI_API_KEY, or GOOGLE_API_KEY) in the app's Secrets settings."
+        )
+    name, api_key, model = provider["name"], provider["api_key"], provider["model"]
+
+    if name.startswith("Claude"):
+        import anthropic  # imported lazily so the app works without it installed
+        client = anthropic.Anthropic(api_key=api_key)
+        response = client.messages.create(
+            model=model, max_tokens=max_tokens, system=system_prompt,
+            messages=[{"role": "user", "content": user_message}],
+        )
+        return "".join(b.text for b in response.content if hasattr(b, "text"))
+
+    elif name.startswith("GPT"):
+        import openai
+        client = openai.OpenAI(api_key=api_key)
+        response = client.chat.completions.create(
+            model=model, max_tokens=max_tokens,
+            messages=[{"role": "system", "content": system_prompt},
+                      {"role": "user", "content": user_message}],
+        )
+        return response.choices[0].message.content or ""
+
+    elif name.startswith("Gemini"):
+        from google import genai
+        client = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
+            model=model,
+            contents=user_message,
+            config={"system_instruction": system_prompt, "max_output_tokens": max_tokens},
+        )
+        return response.text or ""
+
+    else:
+        raise RuntimeError(f"Unknown AI provider '{name}'.")
+
+
+def ai_availability_notice(feature_label: str = "This AI feature"):
+    """Show either a quiet 'using <provider>' caption, or a clear reminder
+    that an API key needs to be configured -- call this at the top of any
+    AI-powered UI section instead of asking the user for a key directly.
+    Returns True if a provider is configured (caller can gate the rest of
+    the widget on this), False otherwise.
+    """
+    provider = get_configured_ai_provider()
+    if provider is None:
+        st.info(
+            f"⚠️ {feature_label} needs an API key. Ask whoever deployed "
+            f"this app to add ANTHROPIC_API_KEY, OPENAI_API_KEY, or "
+            f"GOOGLE_API_KEY in the app's Secrets settings -- individual "
+            f"users don't need to enter their own key."
+        )
+        return False
+    st.caption(f"Using {provider['name']} (configured by the app deployer).")
+    return True
+
+
+# --------------------------------------------------------------------------- #
+# AI style assistant (optional -- uses whichever provider is configured above)
 # --------------------------------------------------------------------------- #
 AI_SYSTEM_PROMPT = """You translate a plot-styling request into JSON parameters.
 Return ONLY a JSON object (no prose, no markdown fences) with any of these
@@ -113,20 +233,11 @@ Example: user says "make the line red and bump up the font size" ->
 """
 
 
-def call_ai_style_assistant(request_text: str, api_key: str) -> dict:
-    """Call the Anthropic API to translate a natural-language styling
-    request into concrete parameter values. Raises on any failure --
-    caller should catch and show a friendly error."""
-    import anthropic  # imported lazily so the app works without it installed
-    client = anthropic.Anthropic(api_key=api_key)
-    response = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=300,
-        system=AI_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": request_text}],
-    )
-    text = "".join(block.text for block in response.content if hasattr(block, "text"))
-    text = text.strip()
+def call_ai_style_assistant(request_text: str) -> dict:
+    """Translate a natural-language styling request into concrete parameter
+    values, via whichever AI provider is configured. Raises on any failure
+    -- caller should catch and show a friendly error."""
+    text = call_ai(AI_SYSTEM_PROMPT, request_text, max_tokens=300).strip()
     if text.startswith("```"):
         text = text.strip("`")
         if text.startswith("json"):
@@ -136,33 +247,23 @@ def call_ai_style_assistant(request_text: str, api_key: str) -> dict:
 
 def render_ai_assistant():
     with st.expander("✨ AI style assistant (optional)"):
-        st.caption(
-            "Describe the look you want in plain language, and Claude will "
-            "set the widgets below for you. Requires your own Anthropic API "
-            "key (never stored or sent anywhere except api.anthropic.com)."
-        )
-        api_key = st.text_input(
-            "Anthropic API key", type="password",
-            value=os.environ.get("ANTHROPIC_API_KEY", ""),
-            key="anthropic_api_key",
-        )
+        st.caption("Describe the look you want in plain language, and it'll be applied to the widgets below.")
+        if not ai_availability_notice("The AI style assistant"):
+            return
         request_text = st.text_input(
             "Styling request",
             placeholder="e.g. 'use a warm colormap, red line, bigger font'",
             key="ai_style_request",
         )
         if st.button("Apply with AI", key="ai_apply_button"):
-            if not api_key:
-                st.error("Please enter your Anthropic API key first.")
-            elif not request_text:
+            if not request_text:
                 st.error("Please describe what you'd like changed.")
             else:
                 try:
-                    with st.spinner("Asking Claude..."):
-                        result = call_ai_style_assistant(request_text, api_key)
-                except ImportError:
-                    st.error("The 'anthropic' package isn't installed. "
-                             "Run: pip install anthropic")
+                    with st.spinner("Asking the AI..."):
+                        result = call_ai_style_assistant(request_text)
+                except ImportError as exc:
+                    st.error(f"A required package isn't installed: {exc}")
                 except Exception as exc:  # noqa: BLE001 -- surfaced to the user directly
                     st.error(f"AI request failed: {exc}")
                 else:
@@ -180,11 +281,11 @@ def render_ai_assistant():
                         st.success("Applied to both tabs: " + ", ".join(applied))
                         st.rerun()
                     else:
-                        st.warning("Claude didn't return any recognized style keys.")
+                        st.warning("The AI didn't return any recognized style keys.")
 
 
 # --------------------------------------------------------------------------- #
-# AI peak-region assistant (optional -- needs an Anthropic API key)
+# AI peak-region assistant (optional -- uses whichever provider is configured above)
 # --------------------------------------------------------------------------- #
 AI_PEAKFIT_SYSTEM_PROMPT = """You translate a peak-fitting request into a JSON list of fitting regions.
 Return ONLY a JSON array (no prose, no markdown fences) of objects, each with:
@@ -198,24 +299,15 @@ judgement for a reasonable window (e.g. +/- 0.1-0.15 1/A) around the stated posi
 """
 
 
-def call_ai_peak_regions(request_text: str, api_key: str) -> List[Tuple[float, float, str]]:
-    """Call the Anthropic API to translate a natural-language peak-fitting
-    request into a list of (q_min, q_max, label) fitting regions. Raises
-    on any failure -- caller should catch and show a friendly error.
-    Malformed individual regions (q_max <= q_min, non-numeric, etc.) are
-    silently dropped rather than raising, so one bad region in a longer
-    request doesn't lose the rest.
+def call_ai_peak_regions(request_text: str) -> List[Tuple[float, float, str]]:
+    """Translate a natural-language peak-fitting request into a list of
+    (q_min, q_max, label) fitting regions, via whichever AI provider is
+    configured. Raises on any failure -- caller should catch and show a
+    friendly error. Malformed individual regions (q_max <= q_min,
+    non-numeric, etc.) are silently dropped rather than raising, so one
+    bad region in a longer request doesn't lose the rest.
     """
-    import anthropic  # imported lazily so the app works without it installed
-    client = anthropic.Anthropic(api_key=api_key)
-    response = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=1000,
-        system=AI_PEAKFIT_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": request_text}],
-    )
-    text = "".join(block.text for block in response.content if hasattr(block, "text"))
-    text = text.strip()
+    text = call_ai(AI_PEAKFIT_SYSTEM_PROMPT, request_text, max_tokens=1000).strip()
     if text.startswith("```"):
         text = text.strip("`")
         if text.startswith("json"):
@@ -234,36 +326,34 @@ def call_ai_peak_regions(request_text: str, api_key: str) -> List[Tuple[float, f
 
 
 def peakfit_ai_prompt_widget(target_list_key: str, widget_key_suffix: str):
-    """Render an API-key + natural-language-prompt + button that appends
-    AI-parsed (q_min, q_max, label) regions to st.session_state[target_list_key].
-    Reused for both the batch (all line cuts) and per-line-cut refit prompts.
+    """Render a natural-language-prompt + button that appends AI-parsed
+    (q_min, q_max, label) regions to st.session_state[target_list_key].
+    Reused for both the batch (all line cuts) and per-line-cut refit
+    prompts. Shows a reminder instead of the prompt box if no AI provider
+    is configured (see get_configured_ai_provider) -- individual users
+    never enter their own API key here.
     """
-    api_key = st.text_input(
-        "Anthropic API key", type="password",
-        value=os.environ.get("ANTHROPIC_API_KEY", ""),
-        key=f"peakfit_api_key_{widget_key_suffix}",
-    )
+    if not ai_availability_notice("Peak-fitting AI assistance"):
+        return
     request_text = st.text_input(
         "Describe the peak(s) to fit",
         placeholder="e.g. 'fit 0.25-0.35 as (010) and 1.6-1.8 as pi-pi stacking'",
         key=f"peakfit_ai_request_{widget_key_suffix}",
     )
     if st.button("Add region(s) with AI", key=f"peakfit_ai_button_{widget_key_suffix}"):
-        if not api_key:
-            st.error("Please enter your Anthropic API key first.")
-        elif not request_text:
+        if not request_text:
             st.error("Please describe the peak(s) you want fit.")
         else:
             try:
-                with st.spinner("Asking Claude..."):
-                    new_regions = call_ai_peak_regions(request_text, api_key)
-            except ImportError:
-                st.error("The 'anthropic' package isn't installed. Run: pip install anthropic")
+                with st.spinner("Asking the AI..."):
+                    new_regions = call_ai_peak_regions(request_text)
+            except ImportError as exc:
+                st.error(f"A required package isn't installed: {exc}")
             except Exception as exc:  # noqa: BLE001 -- surfaced to the user directly
                 st.error(f"AI request failed: {exc}")
             else:
                 if not new_regions:
-                    st.warning("Claude didn't return any usable regions -- try rephrasing.")
+                    st.warning("The AI didn't return any usable regions -- try rephrasing.")
                 else:
                     st.session_state[target_list_key].extend(new_regions)
                     st.success(f"Added {len(new_regions)} region(s).")
@@ -304,6 +394,7 @@ def build_2d_results_zip(qip_range, qoop_range) -> bytes:
                 font_size=st.session_state["2d_font_size"],
                 axis_label_style=st.session_state["2d_axis_labels"],
                 tick_spacing=st.session_state["2d_tick_spacing"],
+                subtick_spacing=st.session_state["2d_subtick_spacing"] or None,
             )
             img_buf = io.BytesIO()
             fig2d.savefig(img_buf, format="png", dpi=st.session_state["2d_dpi"])
@@ -708,8 +799,8 @@ def units_for_file(get_unit_fiber, filename: str, verbose: bool = False):
 st.title("GIWAXS Processing Toolkit")
 render_ai_assistant()
 
-tab_2d, tab_pf, tab_peakfit = st.tabs(
-    ["2D image + line cuts", "Pole figure (cartesian)", "Peak fitting"]
+tab_2d, tab_peakfit, tab_pf = st.tabs(
+    ["2D image + line cuts", "Peak fitting", "Pole figure (cartesian)"]
 )
 
 # --------------------------------------------------------------------------- #
@@ -759,7 +850,7 @@ def style_widgets(show_cmap: bool, show_sector_color: bool, key_prefix: str):
                 format_func=lambda v: "q_ip / q_oop" if v == "ip_oop" else "q_xy / q_z",
             )
 
-    cols3 = st.columns(2)
+    cols3 = st.columns(3)
     if show_cmap:
         with cols3[0]:
             st.number_input("2D image tick spacing (1/Å)", min_value=0.01, step=0.05,
@@ -767,6 +858,13 @@ def style_widgets(show_cmap: bool, show_sector_color: bool, key_prefix: str):
         with cols3[1]:
             st.number_input("Line cut tick spacing (1/Å)", min_value=0.01, step=0.05,
                              key=f"{p}_linecut_tick_spacing", format="%.2f")
+        with cols3[2]:
+            st.number_input(
+                "2D image subticks (1/Å)", min_value=0.0, step=0.05,
+                key=f"{p}_subtick_spacing", format="%.2f",
+                help="Minor tick spacing between the major ticks. 0 = off "
+                     "(no subticks), which is the default.",
+            )
     else:
         with cols3[0]:
             st.number_input("Chi axis tick spacing (deg)", min_value=1.0, step=5.0,
@@ -898,7 +996,7 @@ with tab_2d:
                 st.session_state["2d_vmax"] if st.session_state["2d_use_manual_scale"] else None,
                 st.session_state["2d_font_family"], st.session_state["2d_font_size"],
                 st.session_state["2d_axis_labels"], st.session_state["2d_dpi"],
-                st.session_state["2d_tick_spacing"],
+                st.session_state["2d_tick_spacing"], st.session_state["2d_subtick_spacing"],
             )
             if img_cache_key not in d2_plot_cache:
                 fig2d = gc.plot_2d_image(
@@ -913,6 +1011,7 @@ with tab_2d:
                     font_size=st.session_state["2d_font_size"],
                     axis_label_style=st.session_state["2d_axis_labels"],
                     tick_spacing=st.session_state["2d_tick_spacing"],
+                    subtick_spacing=st.session_state["2d_subtick_spacing"] or None,
                 )
                 buf = io.BytesIO()
                 fig2d.savefig(buf, format="png", dpi=st.session_state["2d_dpi"])
