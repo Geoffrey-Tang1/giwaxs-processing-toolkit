@@ -123,6 +123,7 @@ AI_PROVIDERS = [
     {"name": "Gemini (Google)", "key_name": "GOOGLE_API_KEY",
      "model_name": "GOOGLE_MODEL", "default_model": "gemini-2.5-flash"},
 ]
+AI_PROVIDER_NAMES = [p["name"] for p in AI_PROVIDERS]
 
 
 def _get_secret_or_env(name: str) -> Optional[str]:
@@ -135,15 +136,38 @@ def _get_secret_or_env(name: str) -> Optional[str]:
 
 
 def get_configured_ai_provider() -> Optional[dict]:
-    """Return the config dict (from AI_PROVIDERS) for the first provider
-    that has an API key configured via secrets/env, with its resolved
-    api_key and model filled in -- or None if nothing is configured.
+    """Return the config dict (from AI_PROVIDERS) for whichever provider is
+    available, with its resolved api_key and model filled in -- or None if
+    nothing is configured. Priority order:
+      1. What the user entered THIS session in the AI settings box below
+         (render_ai_settings) -- this is the normal path.
+      2. A backend-configured key (Streamlit secrets or an environment
+         variable) for the SAME provider the user selected, if they didn't
+         type a key themselves -- lets whoever deployed the app pre-fill a
+         shared key for convenience without forcing everyone to paste one.
+      3. If the user hasn't touched the provider selector at all, fall back
+         to scanning secrets/env for ANY configured provider.
     """
+    selected_name = st.session_state.get("ai_selected_provider")
+    user_key = st.session_state.get("ai_user_api_key", "").strip()
+    selected_cfg = next((p for p in AI_PROVIDERS if p["name"] == selected_name), None)
+
+    if selected_cfg and user_key:
+        model = _get_secret_or_env(selected_cfg["model_name"]) or selected_cfg["default_model"]
+        return {**selected_cfg, "api_key": user_key, "model": model}
+
+    if selected_cfg:
+        backend_key = _get_secret_or_env(selected_cfg["key_name"])
+        if backend_key:
+            model = _get_secret_or_env(selected_cfg["model_name"]) or selected_cfg["default_model"]
+            return {**selected_cfg, "api_key": backend_key, "model": model}
+        return None  # a provider IS selected but no key anywhere -- don't silently fall through to a different one
+
     for provider in AI_PROVIDERS:
-        api_key = _get_secret_or_env(provider["key_name"])
-        if api_key:
+        backend_key = _get_secret_or_env(provider["key_name"])
+        if backend_key:
             model = _get_secret_or_env(provider["model_name"]) or provider["default_model"]
-            return {**provider, "api_key": api_key, "model": model}
+            return {**provider, "api_key": backend_key, "model": model}
     return None
 
 
@@ -156,9 +180,8 @@ def call_ai(system_prompt: str, user_message: str, max_tokens: int = 1000) -> st
     provider = get_configured_ai_provider()
     if provider is None:
         raise RuntimeError(
-            "No AI provider is configured for this app. Ask whoever "
-            "deployed it to add an API key (ANTHROPIC_API_KEY, "
-            "OPENAI_API_KEY, or GOOGLE_API_KEY) in the app's Secrets settings."
+            "No API key is set. Enter one in the AI settings box above "
+            "(or ask whoever deployed this app to pre-configure one)."
         )
     name, api_key, model = provider["name"], provider["api_key"], provider["model"]
 
@@ -195,23 +218,53 @@ def call_ai(system_prompt: str, user_message: str, max_tokens: int = 1000) -> st
         raise RuntimeError(f"Unknown AI provider '{name}'.")
 
 
+def render_ai_settings():
+    """ONE shared place (rendered once, near the top of the page) to pick
+    an AI provider and paste an API key -- used by BOTH the style
+    assistant and peak-fitting AI features below, so you only enter a key
+    once per session rather than once per feature. Never stored beyond
+    this browser session/st.session_state (not written to disk, not sent
+    anywhere except the selected provider's own API).
+    """
+    with st.expander("🔑 AI settings (needed for the AI style assistant and peak-fitting AI features)"):
+        st.caption(
+            "Pick a provider and paste your own API key -- used only for "
+            "this session's requests to that provider, never stored or "
+            "sent anywhere else. Leave blank if the app deployer has "
+            "already pre-configured one for you (this box will say so below)."
+        )
+        cols = st.columns(2)
+        with cols[0]:
+            st.selectbox("Provider", AI_PROVIDER_NAMES, key="ai_selected_provider")
+        with cols[1]:
+            st.text_input("API key", type="password", key="ai_user_api_key")
+
+        provider = get_configured_ai_provider()
+        if provider is None:
+            selected = st.session_state.get("ai_selected_provider", AI_PROVIDER_NAMES[0])
+            st.warning(
+                f"No key available for {selected} yet -- paste one above, "
+                f"pick a different provider you have a key for, or ask the "
+                f"app deployer to pre-configure one."
+            )
+        else:
+            source = "you entered" if st.session_state.get("ai_user_api_key", "").strip() else "pre-configured by the deployer"
+            st.success(f"Ready -- using {provider['name']} (key {source}).")
+
+
 def ai_availability_notice(feature_label: str = "This AI feature"):
     """Show either a quiet 'using <provider>' caption, or a clear reminder
-    that an API key needs to be configured -- call this at the top of any
-    AI-powered UI section instead of asking the user for a key directly.
+    to fill in the AI settings box above -- call this at the top of any
+    AI-powered UI section instead of asking for a key directly in-place.
     Returns True if a provider is configured (caller can gate the rest of
     the widget on this), False otherwise.
     """
     provider = get_configured_ai_provider()
     if provider is None:
-        st.info(
-            f"⚠️ {feature_label} needs an API key. Ask whoever deployed "
-            f"this app to add ANTHROPIC_API_KEY, OPENAI_API_KEY, or "
-            f"GOOGLE_API_KEY in the app's Secrets settings -- individual "
-            f"users don't need to enter their own key."
-        )
+        st.info(f"⚠️ {feature_label} needs an API key -- set one in "
+                f"\"🔑 AI settings\" near the top of the page.")
         return False
-    st.caption(f"Using {provider['name']} (configured by the app deployer).")
+    st.caption(f"Using {provider['name']}.")
     return True
 
 
@@ -797,6 +850,7 @@ def units_for_file(get_unit_fiber, filename: str, verbose: bool = False):
 # Main area
 # --------------------------------------------------------------------------- #
 st.title("GIWAXS Processing Toolkit")
+render_ai_settings()
 render_ai_assistant()
 
 tab_2d, tab_peakfit, tab_pf = st.tabs(
