@@ -1268,7 +1268,9 @@ def plot_2d_image(qx, qy, intensity, out_path=None, qlim_x=None, qlim_y=None,
         else:
             ax[0].xaxis.set_minor_locator(NullLocator())
             ax[0].yaxis.set_minor_locator(NullLocator())
-        plt.colorbar(mesh, cax=ax[1], orientation="vertical")
+        ax[0].tick_params(axis="both", which="both", direction="in")
+        cbar = plt.colorbar(mesh, cax=ax[1], orientation="vertical")
+        cbar.ax.tick_params(which="both", direction="in")
         fig.tight_layout()
         if out_path:
             fig.savefig(out_path, dpi=dpi)
@@ -1347,6 +1349,7 @@ def plot_1d_linecut(q, intensity, out_path=None, angle_range=(0, 0), title=None,
             ax.tick_params(which="minor", length=3)
         else:
             ax.xaxis.set_minor_locator(NullLocator())  # avoid cluttered log-scale minor ticks
+        ax.tick_params(axis="both", which="both", direction="in")
         ax.xaxis.set_major_formatter(ScalarFormatter())  # plain "0.3" not "3x10^-1"
         ax.set_title(title or f"Line profile: {angle_range[0]} to {angle_range[1]} deg")
         fig.tight_layout()
@@ -1473,6 +1476,7 @@ def plot_chi_intensity_profile(chi_axis, profile, out_path=None, target_q=0.0, d
         ax.set_xlim(chi_range)
         if tick_spacing:
             ax.xaxis.set_major_locator(MultipleLocator(tick_spacing))
+        ax.tick_params(axis="both", which="both", direction="in")
         ax.set_xlabel(r"$\chi$ (°)")
         ax.set_ylabel("Intensity (a.u.)")
 
@@ -1778,6 +1782,7 @@ def plot_linecut_with_fits(q, intensity, fits: List[Dict[str, object]], out_path
         if subtick_spacing:
             ax.xaxis.set_minor_locator(MultipleLocator(subtick_spacing))
             ax.tick_params(which="minor", length=3)
+        ax.tick_params(axis="both", which="both", direction="in")
         if fits:
             ax.legend(fontsize=8, loc="best", framealpha=0.85)
         if title:
