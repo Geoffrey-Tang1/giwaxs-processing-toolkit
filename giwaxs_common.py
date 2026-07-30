@@ -29,7 +29,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
-from matplotlib.ticker import MultipleLocator
+from matplotlib.ticker import MultipleLocator, NullLocator
 
 # matplotlib logs a "findfont: Font family '...' not found" warning for
 # EVERY text element rendered with an unavailable font (once per axis
@@ -1226,9 +1226,16 @@ def plot_2d_image(qx, qy, intensity, out_path=None, qlim_x=None, qlim_y=None,
                    vmin: Optional[float] = None, vmax: Optional[float] = None,
                    font_family: Optional[str] = None, font_size: Optional[float] = None,
                    dpi: int = DEFAULT_DPI, figsize: Tuple[float, float] = DEFAULT_FIGSIZE,
-                   axis_label_style: str = "xyz", tick_spacing: float = 0.5):
+                   axis_label_style: str = "xyz", tick_spacing: float = 0.5,
+                   subtick_spacing: Optional[float] = None):
     """2D GIWAXS q-space image -- deliberately has NO title (kept plain for
     publication/figure use); use an external caption/label if you need one.
+
+    subtick_spacing: minor-tick interval (1/A), OFF by default (None or 0
+    both mean "no minor ticks", matching typical publication-figure
+    conventions where they're an opt-in extra rather than the default).
+    Minor ticks are unlabelled short marks between the major ticks; they
+    don't need to evenly divide tick_spacing.
 
     If out_path is given, saves the figure there and returns None (closes
     the figure). If out_path is None, returns the (open) Figure instead --
@@ -1254,6 +1261,13 @@ def plot_2d_image(qx, qy, intensity, out_path=None, qlim_x=None, qlim_y=None,
         if tick_spacing:
             ax[0].xaxis.set_major_locator(MultipleLocator(tick_spacing))
             ax[0].yaxis.set_major_locator(MultipleLocator(tick_spacing))
+        if subtick_spacing:
+            ax[0].xaxis.set_minor_locator(MultipleLocator(subtick_spacing))
+            ax[0].yaxis.set_minor_locator(MultipleLocator(subtick_spacing))
+            ax[0].tick_params(which="minor", length=3)
+        else:
+            ax[0].xaxis.set_minor_locator(NullLocator())
+            ax[0].yaxis.set_minor_locator(NullLocator())
         plt.colorbar(mesh, cax=ax[1], orientation="vertical")
         fig.tight_layout()
         if out_path:
@@ -1302,7 +1316,8 @@ def plot_1d_linecut(q, intensity, out_path=None, angle_range=(0, 0), title=None,
                      line_color: Optional[str] = None,
                      font_family: Optional[str] = None, font_size: Optional[float] = None,
                      dpi: int = DEFAULT_DPI, figsize: Tuple[float, float] = DEFAULT_FIGSIZE,
-                     q_range: Tuple[float, float] = (0.15, 2.0), tick_spacing: float = 0.3):
+                     q_range: Tuple[float, float] = (0.15, 2.0), tick_spacing: float = 0.3,
+                     subtick_spacing: Optional[float] = None):
     """1D line-cut plot: log-scaled q-axis, but with major tick MARKS placed
     at round linear-spaced values (0.3, 0.6, 0.9, ...) rather than the
     log-scale default (powers of ten / 1-2-5 pattern) -- matching the
@@ -1310,6 +1325,10 @@ def plot_1d_linecut(q, intensity, out_path=None, angle_range=(0, 0), title=None,
     log-x view of the data. Ticks will look visually non-uniform (that's
     an inherent property of a log axis), but the labelled values themselves
     are the clean round numbers from tick_spacing.
+
+    subtick_spacing: minor-tick interval (1/A), OFF by default -- a log
+    axis's default minor ticks are visually cluttered, so they're
+    explicitly suppressed unless you opt in with a specific spacing here.
     """
     from matplotlib.ticker import ScalarFormatter, NullLocator
     with style_context(font_family, font_size):
@@ -1323,6 +1342,10 @@ def plot_1d_linecut(q, intensity, out_path=None, angle_range=(0, 0), title=None,
             ax.set_xlim(q_range)
         if tick_spacing:
             ax.xaxis.set_major_locator(MultipleLocator(tick_spacing))
+        if subtick_spacing:
+            ax.xaxis.set_minor_locator(MultipleLocator(subtick_spacing))
+            ax.tick_params(which="minor", length=3)
+        else:
             ax.xaxis.set_minor_locator(NullLocator())  # avoid cluttered log-scale minor ticks
         ax.xaxis.set_major_formatter(ScalarFormatter())  # plain "0.3" not "3x10^-1"
         ax.set_title(title or f"Line profile: {angle_range[0]} to {angle_range[1]} deg")
@@ -1718,13 +1741,15 @@ def plot_linecut_with_fits(q, intensity, fits: List[Dict[str, object]], out_path
                             font_family: Optional[str] = None, font_size: Optional[float] = None,
                             dpi: int = DEFAULT_DPI, figsize: Tuple[float, float] = DEFAULT_FIGSIZE,
                             q_range: Optional[Tuple[float, float]] = None,
-                            tick_spacing: Optional[float] = 0.3):
+                            tick_spacing: Optional[float] = 0.3,
+                            subtick_spacing: Optional[float] = None):
     """Plot a 1D line-cut curve with one or more fitted peaks (each a dict
     from fit_peak/fit_multiple_peaks) overlaid: the fitted model curve
     drawn on top of the raw data, the fit window lightly shaded, and the
     fitted peak centre marked with a vertical line -- so fit quality can
     be judged visually at a glance. `fits` may be an empty list (just
     shows the raw data, e.g. before any fitting has been done yet).
+    subtick_spacing: minor-tick interval (1/A), off by default.
     """
     with style_context(font_family, font_size):
         fig, ax = plt.subplots(1, 1, figsize=figsize)
@@ -1750,6 +1775,9 @@ def plot_linecut_with_fits(q, intensity, fits: List[Dict[str, object]], out_path
             ax.set_xlim(q_range)
         if tick_spacing:
             ax.xaxis.set_major_locator(MultipleLocator(tick_spacing))
+        if subtick_spacing:
+            ax.xaxis.set_minor_locator(MultipleLocator(subtick_spacing))
+            ax.tick_params(which="minor", length=3)
         if fits:
             ax.legend(fontsize=8, loc="best", framealpha=0.85)
         if title:
