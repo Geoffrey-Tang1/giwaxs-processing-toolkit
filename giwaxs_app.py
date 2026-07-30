@@ -252,20 +252,20 @@ def render_ai_settings():
             st.success(f"Ready -- using {provider['name']} (key {source}).")
 
 
-def ai_availability_notice(feature_label: str = "This AI feature"):
-    """Show either a quiet 'using <provider>' caption, or a clear reminder
-    to fill in the AI settings box above -- call this at the top of any
-    AI-powered UI section instead of asking for a key directly in-place.
-    Returns True if a provider is configured (caller can gate the rest of
-    the widget on this), False otherwise.
+def ai_availability_notice(feature_label: str = "this feature"):
+    """Show either a quiet 'using <provider>' caption, or a reminder that
+    an API key needs to be set -- purely informational. Does NOT hide or
+    gate the rest of the calling section: the prompt box and button should
+    always be visible, and attempting a request without a key will fail
+    with a clear, specific error at that point (via call_ai's own
+    RuntimeError) -- that's enough; there's no need to hide the box itself.
     """
     provider = get_configured_ai_provider()
     if provider is None:
-        st.info(f"⚠️ {feature_label} needs an API key -- set one in "
-                f"\"🔑 AI settings\" near the top of the page.")
-        return False
-    st.caption(f"Using {provider['name']}.")
-    return True
+        st.caption(f"⚠️ No API key set yet -- set one in \"🔑 AI settings\" "
+                   f"near the top of the page to use {feature_label}.")
+    else:
+        st.caption(f"Using {provider['name']}.")
 
 
 # --------------------------------------------------------------------------- #
@@ -301,8 +301,7 @@ def call_ai_style_assistant(request_text: str) -> dict:
 def render_ai_assistant():
     with st.expander("✨ AI style assistant (optional)"):
         st.caption("Describe the look you want in plain language, and it'll be applied to the widgets below.")
-        if not ai_availability_notice("The AI style assistant"):
-            return
+        ai_availability_notice("the AI style assistant")
         request_text = st.text_input(
             "Styling request",
             placeholder="e.g. 'use a warm colormap, red line, bigger font'",
@@ -382,12 +381,11 @@ def peakfit_ai_prompt_widget(target_list_key: str, widget_key_suffix: str):
     """Render a natural-language-prompt + button that appends AI-parsed
     (q_min, q_max, label) regions to st.session_state[target_list_key].
     Reused for both the batch (all line cuts) and per-line-cut refit
-    prompts. Shows a reminder instead of the prompt box if no AI provider
-    is configured (see get_configured_ai_provider) -- individual users
-    never enter their own API key here.
+    prompts. Always visible, with a small reminder if no key is set yet
+    (see ai_availability_notice) -- attempting to use it without a key
+    fails with a clear, specific error rather than hiding the box entirely.
     """
-    if not ai_availability_notice("Peak-fitting AI assistance"):
-        return
+    ai_availability_notice("peak-fitting AI assistance")
     request_text = st.text_input(
         "Describe the peak(s) to fit",
         placeholder="e.g. 'fit 0.25-0.35 as (010) and 1.6-1.8 as pi-pi stacking'",
