@@ -26,7 +26,7 @@ import zipfile
 import json
 import os
 import tempfile
-from typing import Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -181,6 +181,93 @@ def render_ai_assistant():
                         st.rerun()
                     else:
                         st.warning("Claude didn't return any recognized style keys.")
+
+
+# --------------------------------------------------------------------------- #
+# AI peak-region assistant (optional -- needs an Anthropic API key)
+# --------------------------------------------------------------------------- #
+AI_PEAKFIT_SYSTEM_PROMPT = """You translate a peak-fitting request into a JSON list of fitting regions.
+Return ONLY a JSON array (no prose, no markdown fences) of objects, each with:
+- "q_min": lower bound of the q-range to fit, a positive number in inverse Angstrom
+- "q_max": upper bound of the q-range to fit, a positive number greater than q_min
+- "label": a short label for this peak -- a Miller index like "(100)" or "(010)" if the user gave or implied one, otherwise a short descriptive name (e.g. "pi-pi stacking"). Use whatever the user said; invent a short sensible label only if they gave none.
+Example: user says "fit 0.25 to 0.35 as (010), and 1.6-1.8 as pi-pi stacking" ->
+[{"q_min": 0.25, "q_max": 0.35, "label": "(010)"}, {"q_min": 1.6, "q_max": 1.8, "label": "pi-pi stacking"}]
+If the user's request is ambiguous about exact bounds (e.g. "fit the peak near 1.67"), use your best
+judgement for a reasonable window (e.g. +/- 0.1-0.15 1/A) around the stated position.
+"""
+
+
+def call_ai_peak_regions(request_text: str, api_key: str) -> List[Tuple[float, float, str]]:
+    """Call the Anthropic API to translate a natural-language peak-fitting
+    request into a list of (q_min, q_max, label) fitting regions. Raises
+    on any failure -- caller should catch and show a friendly error.
+    Malformed individual regions (q_max <= q_min, non-numeric, etc.) are
+    silently dropped rather than raising, so one bad region in a longer
+    request doesn't lose the rest.
+    """
+    import anthropic  # imported lazily so the app works without it installed
+    client = anthropic.Anthropic(api_key=api_key)
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=1000,
+        system=AI_PEAKFIT_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": request_text}],
+    )
+    text = "".join(block.text for block in response.content if hasattr(block, "text"))
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.startswith("json"):
+            text = text[4:]
+    raw_regions = json.loads(text)
+    regions = []
+    for r in raw_regions:
+        try:
+            q_min, q_max = float(r["q_min"]), float(r["q_max"])
+            if q_max <= q_min:
+                continue
+            regions.append((q_min, q_max, str(r.get("label", ""))))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return regions
+
+
+def peakfit_ai_prompt_widget(target_list_key: str, widget_key_suffix: str):
+    """Render an API-key + natural-language-prompt + button that appends
+    AI-parsed (q_min, q_max, label) regions to st.session_state[target_list_key].
+    Reused for both the batch (all line cuts) and per-line-cut refit prompts.
+    """
+    api_key = st.text_input(
+        "Anthropic API key", type="password",
+        value=os.environ.get("ANTHROPIC_API_KEY", ""),
+        key=f"peakfit_api_key_{widget_key_suffix}",
+    )
+    request_text = st.text_input(
+        "Describe the peak(s) to fit",
+        placeholder="e.g. 'fit 0.25-0.35 as (010) and 1.6-1.8 as pi-pi stacking'",
+        key=f"peakfit_ai_request_{widget_key_suffix}",
+    )
+    if st.button("Add region(s) with AI", key=f"peakfit_ai_button_{widget_key_suffix}"):
+        if not api_key:
+            st.error("Please enter your Anthropic API key first.")
+        elif not request_text:
+            st.error("Please describe the peak(s) you want fit.")
+        else:
+            try:
+                with st.spinner("Asking Claude..."):
+                    new_regions = call_ai_peak_regions(request_text, api_key)
+            except ImportError:
+                st.error("The 'anthropic' package isn't installed. Run: pip install anthropic")
+            except Exception as exc:  # noqa: BLE001 -- surfaced to the user directly
+                st.error(f"AI request failed: {exc}")
+            else:
+                if not new_regions:
+                    st.warning("Claude didn't return any usable regions -- try rephrasing.")
+                else:
+                    st.session_state[target_list_key].extend(new_regions)
+                    st.success(f"Added {len(new_regions)} region(s).")
+                    st.rerun()
 
 
 # --------------------------------------------------------------------------- #
@@ -493,7 +580,7 @@ with st.sidebar:
                 caption=f"Fit check ({st.session_state['calibration_n_points']} ring points, "
                         f"chi2: {chi2_before:.4g} -> {chi2_after:.4g}). Dots = detected ring "
                         f"points, green lines = fitted rings -- should overlap closely.",
-                use_container_width=True,
+                width='stretch',
             )
             if st.session_state.get("calibration_confirmed"):
                 st.success(
@@ -621,7 +708,9 @@ def units_for_file(get_unit_fiber, filename: str, verbose: bool = False):
 st.title("GIWAXS Processing Toolkit")
 render_ai_assistant()
 
-tab_2d, tab_pf = st.tabs(["2D image + line cuts", "Pole figure (cartesian)"])
+tab_2d, tab_pf, tab_peakfit = st.tabs(
+    ["2D image + line cuts", "Pole figure (cartesian)", "Peak fitting"]
+)
 
 # --------------------------------------------------------------------------- #
 # Shared style widgets (used by both tabs where relevant)
@@ -886,7 +975,7 @@ with tab_2d:
                 )
 
                 with st.expander(f"View data table -- {res['name']}: {angles} deg"):
-                    st.dataframe(linecut_df, use_container_width=True, height=250)
+                    st.dataframe(linecut_df, width='stretch', height=250)
 
 # --------------------------------------------------------------------------- #
 # Tab 2: pole figure (cartesian only)
@@ -933,7 +1022,7 @@ with tab_pf:
         edited = st.data_editor(
             pd.DataFrame(table_rows),
             key="q_table_editor",
-            use_container_width=True,
+            width='stretch',
             num_rows="fixed",
             column_config={
                 "filename": st.column_config.TextColumn("Filename", disabled=True),
@@ -1107,4 +1196,216 @@ with tab_pf:
                     "Download data (.txt)", txt_buf.getvalue(),
                     file_name=f"{res['name']}_polefigure_q{q_tag}_chi_profile.txt", mime="text/plain",
                     key=f"dlpftxt_{res['name']}_{q_tag}",
+                )
+
+
+def _sanitize_tag(text: str) -> str:
+    """Turn an arbitrary label/line-cut key into a safe filename fragment."""
+    import re
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", text).strip("_")
+
+
+with tab_peakfit:
+    st.header("Peak fitting")
+
+    if not st.session_state["processed_2d"]:
+        st.info(
+            "Process some 2D images + line cuts in the first tab before peak "
+            "fitting -- this tab fits peaks on the line cuts ALREADY computed "
+            "there; it doesn't reprocess raw TIFFs itself."
+        )
+    else:
+        linecut_lookup = {}
+        for res in st.session_state["processed_2d"]:
+            for angles, q, intensity in res["linecuts"]:
+                linecut_lookup[f"{res['name']} :: {angles} deg"] = (q, intensity)
+
+        st.session_state.setdefault("peakfit_regions", [])
+        st.session_state.setdefault("peakfit_results", {})
+        st.session_state.setdefault("_peakfit_plot_cache", {})
+
+        st.subheader("1. Select line cuts to fit")
+        selected_keys = st.multiselect(
+            "Line cuts", list(linecut_lookup.keys()),
+            default=list(linecut_lookup.keys()), key="peakfit_selected_linecuts",
+        )
+
+        st.subheader("2. Peak shape")
+        shape_col, k_col = st.columns(2)
+        with shape_col:
+            peak_shape = st.selectbox("Peak shape", ["gaussian", "lorentzian", "pseudo_voigt"],
+                                       key="peakfit_shape")
+        with k_col:
+            scherrer_k = st.number_input(
+                "Scherrer shape factor K", value=0.9, min_value=0.1, max_value=2.0, step=0.05,
+                key="peakfit_scherrer_k",
+                help="Coherence length = 2*pi*K / FWHM. 0.9 is the most common literature default.",
+            )
+
+        st.subheader("3. Define fitting regions")
+        st.caption(
+            "Add regions manually, or describe them in plain language below -- "
+            "both add to the same list, which is used for \"Fit ALL\" below."
+        )
+        rc1, rc2, rc3, rc4 = st.columns([1, 1, 1.2, 0.7])
+        with rc1:
+            new_qmin = st.number_input("q min (1/Å)", value=0.20, format="%.4f", key="peakfit_new_qmin")
+        with rc2:
+            new_qmax = st.number_input("q max (1/Å)", value=0.40, format="%.4f", key="peakfit_new_qmax")
+        with rc3:
+            new_label = st.text_input("Label", value="(100)", key="peakfit_new_label")
+        with rc4:
+            st.markdown("<div style='height: 1.7em'></div>", unsafe_allow_html=True)
+            if st.button("+ Add region", key="peakfit_add_region"):
+                if new_qmax <= new_qmin:
+                    st.error("q max must be greater than q min.")
+                else:
+                    st.session_state["peakfit_regions"].append((new_qmin, new_qmax, new_label))
+                    st.rerun()
+
+        with st.expander("✨ Or describe peak(s) in plain language (AI, optional)"):
+            st.caption(
+                "Requires your own Anthropic API key (never stored or sent "
+                "anywhere except api.anthropic.com)."
+            )
+            peakfit_ai_prompt_widget("peakfit_regions", "batch")
+
+        if st.session_state["peakfit_regions"]:
+            st.write("Current regions:")
+            for i, (qmin, qmax, label) in enumerate(st.session_state["peakfit_regions"]):
+                rcol1, rcol2 = st.columns([5, 1])
+                rcol1.write(f"`{label}`: {qmin:.4f} - {qmax:.4f} 1/Å")
+                if rcol2.button("Remove", key=f"peakfit_remove_region_{i}"):
+                    st.session_state["peakfit_regions"].pop(i)
+                    st.rerun()
+        else:
+            st.caption("No regions defined yet.")
+
+        st.divider()
+        if st.button("🔬 Fit ALL selected line cuts", type="primary", key="peakfit_fit_all"):
+            if not st.session_state["peakfit_regions"]:
+                st.error("Add at least one fitting region first.")
+            elif not selected_keys:
+                st.error("Select at least one line cut to fit.")
+            else:
+                results = {}
+                n_ok = 0
+                for lc_key in selected_keys:
+                    q, intensity = linecut_lookup[lc_key]
+                    fit_list = []
+                    for q_min, q_max, label in st.session_state["peakfit_regions"]:
+                        try:
+                            fit_list.append(gc.fit_peak(
+                                q, intensity, q_min, q_max,
+                                shape=peak_shape, scherrer_k=scherrer_k, label=label,
+                            ))
+                            n_ok += 1
+                        except gc.GiwaxsError as exc:
+                            st.warning(f"{lc_key} -- {label}: {exc}")
+                    results[lc_key] = fit_list
+                    # Seed this line cut's OWN region list (for the per-line-cut
+                    # refit box below) from the batch list, first time only --
+                    # after that it's independently editable.
+                    st.session_state.setdefault(
+                        f"peakfit_regions__{lc_key}", list(st.session_state["peakfit_regions"])
+                    )
+                st.session_state["peakfit_results"] = results
+                st.session_state["_peakfit_plot_cache"] = {}  # invalidate stale cached plots
+                st.success(f"Fit {n_ok} peak(s) across {len(results)} line cut(s).")
+
+        if st.session_state["peakfit_results"]:
+            st.divider()
+            st.subheader("Results")
+            all_rows = []
+            plot_cache = st.session_state["_peakfit_plot_cache"]
+
+            for lc_key, fit_list in st.session_state["peakfit_results"].items():
+                if lc_key not in linecut_lookup:
+                    continue  # stale entry from before a reprocess in tab 1
+                q, intensity = linecut_lookup[lc_key]
+                tag = _sanitize_tag(lc_key)
+                st.markdown(f"#### {lc_key}")
+
+                fit_signature = tuple(
+                    (round(f["q0"], 6), round(f["fwhm"], 6), f["label"], f["shape"])
+                    for f in fit_list
+                )
+                cache_key = (
+                    lc_key, fit_signature, st.session_state["2d_line_color"],
+                    st.session_state["2d_font_family"], st.session_state["2d_font_size"],
+                    st.session_state["2d_dpi"], st.session_state["2d_linecut_tick_spacing"],
+                )
+                if cache_key not in plot_cache:
+                    fig = gc.plot_linecut_with_fits(
+                        q, intensity, fit_list, out_path=None, title=lc_key,
+                        line_color=st.session_state["2d_line_color"],
+                        font_family=st.session_state["2d_font_family"],
+                        font_size=st.session_state["2d_font_size"],
+                        tick_spacing=st.session_state["2d_linecut_tick_spacing"],
+                    )
+                    buf = io.BytesIO()
+                    fig.savefig(buf, format="png", dpi=st.session_state["2d_dpi"])
+                    plt.close(fig)
+                    plot_cache[cache_key] = buf.getvalue()
+                png_bytes = plot_cache[cache_key]
+
+                pf1, pf2 = st.columns([2, 1])
+                with pf1:
+                    st.image(png_bytes)
+                pf2.download_button(
+                    "Download plot PNG", png_bytes, file_name=f"{tag}_peakfit.png",
+                    mime="image/png", key=f"peakfit_dlplot_{tag}",
+                )
+
+                with pf2.expander("Refit just this one"):
+                    st.session_state.setdefault(
+                        f"peakfit_regions__{lc_key}", list(st.session_state["peakfit_regions"])
+                    )
+                    for j, (qmin, qmax, label) in enumerate(st.session_state[f"peakfit_regions__{lc_key}"]):
+                        st.caption(f"`{label}`: {qmin:.4f} - {qmax:.4f} 1/Å")
+                    peakfit_ai_prompt_widget(f"peakfit_regions__{lc_key}", f"single_{tag}")
+                    if st.button("Refit this line cut", key=f"peakfit_refit_{tag}"):
+                        new_fit_list = []
+                        for q_min, q_max, label in st.session_state[f"peakfit_regions__{lc_key}"]:
+                            try:
+                                new_fit_list.append(gc.fit_peak(
+                                    q, intensity, q_min, q_max,
+                                    shape=peak_shape, scherrer_k=scherrer_k, label=label,
+                                ))
+                            except gc.GiwaxsError as exc:
+                                st.warning(f"{label}: {exc}")
+                        st.session_state["peakfit_results"][lc_key] = new_fit_list
+                        st.rerun()
+
+                if fit_list:
+                    table_rows = [{
+                        "Label": f["label"], "q [1/Å]": round(f["q0"], 5),
+                        "d-spacing [Å]": round(f["d_spacing"], 4),
+                        "FWHM [1/Å]": round(f["fwhm"], 5),
+                        "L_c [Å]": round(f["coherence_length"], 2),
+                        "Peak Intensity": round(f["peak_intensity"], 2),
+                        "Peak Area": round(f["peak_area"], 2),
+                        "R\u00b2": round(f["r_squared"], 4),
+                    } for f in fit_list]
+                    df = pd.DataFrame(table_rows)
+                    st.dataframe(df, width='stretch')
+                    st.download_button(
+                        "Download table (.csv)", df.to_csv(index=False),
+                        file_name=f"{tag}_peakfit.csv", mime="text/csv",
+                        key=f"peakfit_dltable_{tag}",
+                    )
+                    for row in table_rows:
+                        row_with_source = {"Line cut": lc_key, **row}
+                        all_rows.append(row_with_source)
+                else:
+                    st.caption("No successfully fit peaks for this line cut.")
+
+            if all_rows:
+                st.divider()
+                combined_df = pd.DataFrame(all_rows)
+                st.download_button(
+                    "⬇️ Download ALL peak fit results (CSV)",
+                    combined_df.to_csv(index=False),
+                    file_name="giwaxs_peak_fit_results.csv", mime="text/csv",
+                    key="peakfit_dl_all",
                 )
