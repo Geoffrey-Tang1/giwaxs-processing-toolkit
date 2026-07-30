@@ -118,12 +118,20 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument("--tick-spacing", type=float, default=0.5,
                     help="Major tick spacing (in inverse Angstrom) for both "
                          "axes of the 2D image.")
+    p.add_argument("--subtick-spacing", type=float, default=None,
+                    help="Minor tick spacing (in inverse Angstrom) for both "
+                         "axes of the 2D image. Off (no minor ticks) unless "
+                         "given -- this is an opt-in extra, not shown by default.")
     p.add_argument("--linecut-q-range", type=gc.parse_range, default=(0.15, 2.0),
                     help="X-axis (q) range for line-cut plots, as 'min,max' "
                          "in inverse Angstrom.")
     p.add_argument("--linecut-tick-spacing", type=float, default=0.3,
                     help="Major tick spacing (in inverse Angstrom) for the "
                          "line-cut plots' q-axis.")
+    p.add_argument("--linecut-subtick-spacing", type=float, default=None,
+                    help="Minor tick spacing (in inverse Angstrom) for the "
+                         "line-cut plots' q-axis. Off (no minor ticks) unless "
+                         "given -- an opt-in extra, not shown by default.")
 
     p.add_argument("--extra-ranges", type=gc.parse_range, action="append", default=None,
                     help="Optional additional angular sector to integrate "
@@ -202,7 +210,7 @@ def process_file(tiff_path: str, fi, get_unit_fiber, mask, args, out_dirs, fabio
         cmap=args.cmap, vmin=args.vmin, vmax=args.vmax,
         font_family=args.font_family, font_size=args.font_size,
         dpi=args.dpi, axis_label_style=args.axis_labels,
-        tick_spacing=args.tick_spacing,
+        tick_spacing=args.tick_spacing, subtick_spacing=args.subtick_spacing,
     )
     print(f"  Saved 2D image: {img_out_path}")
 
@@ -228,7 +236,8 @@ def process_file(tiff_path: str, fi, get_unit_fiber, mask, args, out_dirs, fabio
         gc.plot_1d_linecut(q, intensity, plot_out_path, angles, title=f"{base}: {angles} deg",
                             line_color=args.line_color, font_family=args.font_family,
                             font_size=args.font_size, dpi=args.dpi,
-                            q_range=args.linecut_q_range, tick_spacing=args.linecut_tick_spacing)
+                            q_range=args.linecut_q_range, tick_spacing=args.linecut_tick_spacing,
+                            subtick_spacing=args.linecut_subtick_spacing)
 
         # Overlay the sector on a copy of the 2D image for reference.
         overlay_path = os.path.join(out_dirs["images"], f"{base}_sector_{tag}.png")
@@ -245,6 +254,10 @@ def process_file(tiff_path: str, fi, get_unit_fiber, mask, args, out_dirs, fabio
             ax[0].set_ylim(args.qoop_plot_range)
             ax[0].xaxis.set_major_locator(MultipleLocator(args.tick_spacing))
             ax[0].yaxis.set_major_locator(MultipleLocator(args.tick_spacing))
+            if args.subtick_spacing:
+                ax[0].xaxis.set_minor_locator(MultipleLocator(args.subtick_spacing))
+                ax[0].yaxis.set_minor_locator(MultipleLocator(args.subtick_spacing))
+                ax[0].tick_params(which="minor", length=3)
             ax[0].set_xlabel(xlabel)
             ax[0].set_ylabel(ylabel)
             gc.add_angle_lines(ax[0], res_qx, res_qy, angles, color=args.sector_line_color)
