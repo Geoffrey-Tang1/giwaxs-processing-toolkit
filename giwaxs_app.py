@@ -57,6 +57,7 @@ STYLE_DEFAULTS = {
     "font_size": 11.0,
     "dpi": 400,
     "axis_labels": "xyz",
+    "edge_top": "", "edge_bottom": "", "edge_left": "", "edge_right": "",
 }
 # Each tab gets its OWN independent copy of every style setting (keys
 # prefixed "2d_"/"pf_") -- style_widgets() is defined once but instantiated
@@ -71,6 +72,7 @@ for prefix in ("2d_", "pf_"):
 st.session_state.setdefault("2d_tick_spacing", 0.5)            # 2D image, 1/A
 st.session_state.setdefault("2d_linecut_tick_spacing", 0.3)    # line cuts, 1/A
 st.session_state.setdefault("2d_subtick_spacing", 0.0)         # 2D image minor ticks, 1/A -- 0 = off
+st.session_state.setdefault("2d_color_scale", "log")           # 2D image colorbar mapping
 st.session_state.setdefault("pf_tick_spacing", 20.0)           # pole figure chi axis, deg
 st.session_state.setdefault("processed_2d", None)   # cached heavy-computation results
 st.session_state.setdefault("processed_pf", None)
@@ -94,6 +96,15 @@ _pending_calib = st.session_state.pop("_pending_calibration_update", None)
 if _pending_calib:
     for _k, _v in _pending_calib.items():
         st.session_state[_k] = _v
+
+# Same pattern as above, for the symbol keyboard: a button click can't
+# write directly to a text_input's key once that widget has already been
+# instantiated this run, so it stores (target_key, symbol) here instead
+# and reruns; this block applies it before any widgets exist yet.
+_pending_symbol = st.session_state.pop("_pending_symbol_append", None)
+if _pending_symbol:
+    _target_key, _sym = _pending_symbol
+    st.session_state[_target_key] = st.session_state.get(_target_key, "") + _sym
 
 
 # --------------------------------------------------------------------------- #
@@ -446,6 +457,11 @@ def build_2d_results_zip(qip_range, qoop_range) -> bytes:
                 axis_label_style=st.session_state["2d_axis_labels"],
                 tick_spacing=st.session_state["2d_tick_spacing"],
                 subtick_spacing=st.session_state["2d_subtick_spacing"] or None,
+                color_scale=st.session_state["2d_color_scale"],
+                edge_label_top=st.session_state["2d_edge_top"] or None,
+                edge_label_bottom=st.session_state["2d_edge_bottom"] or None,
+                edge_label_left=st.session_state["2d_edge_left"] or None,
+                edge_label_right=st.session_state["2d_edge_right"] or None,
             )
             img_buf = io.BytesIO()
             fig2d.savefig(img_buf, format="png", dpi=st.session_state["2d_dpi"])
@@ -461,6 +477,10 @@ def build_2d_results_zip(qip_range, qoop_range) -> bytes:
                     font_family=st.session_state["2d_font_family"],
                     font_size=st.session_state["2d_font_size"],
                     tick_spacing=st.session_state["2d_linecut_tick_spacing"],
+                    edge_label_top=st.session_state["2d_edge_top"] or None,
+                    edge_label_bottom=st.session_state["2d_edge_bottom"] or None,
+                    edge_label_left=st.session_state["2d_edge_left"] or None,
+                    edge_label_right=st.session_state["2d_edge_right"] or None,
                 )
                 lc_buf = io.BytesIO()
                 fig1d.savefig(lc_buf, format="png", dpi=st.session_state["2d_dpi"])
@@ -493,6 +513,10 @@ def build_pf_results_zip(dq, chi_plot_range) -> bytes:
                     font_family=st.session_state["pf_font_family"],
                     font_size=st.session_state["pf_font_size"],
                     tick_spacing=st.session_state["pf_tick_spacing"],
+                    edge_label_top=st.session_state["pf_edge_top"] or None,
+                    edge_label_bottom=st.session_state["pf_edge_bottom"] or None,
+                    edge_label_left=st.session_state["pf_edge_left"] or None,
+                    edge_label_right=st.session_state["pf_edge_right"] or None,
                 )
                 img_buf = io.BytesIO()
                 fig.savefig(img_buf, format="png", dpi=st.session_state["pf_dpi"])
@@ -851,6 +875,66 @@ st.title("GIWAXS Processing Toolkit")
 render_ai_settings()
 render_ai_assistant()
 
+# --------------------------------------------------------------------------- #
+# Symbol keyboard (Greek letters, units, common scientific symbols) --
+# reusable anywhere a text field could use characters that aren't on a
+# normal keyboard. Streamlit buttons can only append to the END of a
+# field (no true cursor-position insertion), which is a real but
+# acceptable limitation given the platform.
+# --------------------------------------------------------------------------- #
+SYMBOL_KEYBOARD_CHARS = [
+    "α", "β", "γ", "δ", "ε", "θ", "λ", "μ",
+    "π", "ρ", "σ", "τ", "φ", "χ", "ψ", "ω",
+    "Δ", "Σ", "Φ", "Ψ", "Ω", "°", "Å", "±",
+    "×", "·", "→", "∥", "⊥", "≈", "≤", "≥",
+    "⁻¹", "⁻²", "²", "³", "₀", "₁", "₂", "₃",
+]
+
+
+def symbol_keyboard(target_key: str, widget_key_suffix: str):
+    """Render a compact grid of buttons for common Greek letters and
+    scientific symbols/units; clicking one appends it to
+    st.session_state[target_key]. Can't write directly to target_key here
+    (its widget was already instantiated earlier this run) -- stores a
+    pending append instead and reruns; applied at the top of the script,
+    before any widgets exist yet (see _pending_symbol_append above).
+    """
+    n_cols = 8
+    rows = [SYMBOL_KEYBOARD_CHARS[i:i + n_cols] for i in range(0, len(SYMBOL_KEYBOARD_CHARS), n_cols)]
+    for row in rows:
+        cols = st.columns(n_cols)
+        for col, sym in zip(cols, row):
+            with col:
+                if st.button(sym, key=f"symkey_{widget_key_suffix}_{sym}", width="stretch"):
+                    st.session_state["_pending_symbol_append"] = (target_key, sym)
+                    st.rerun()
+
+
+def edge_label_inputs(key_prefix: str):
+    """Render the four optional edge-label text inputs (top/bottom/left/
+    right) plus a shared symbol keyboard that can append to whichever one
+    is selected. Shared across the 2D and pole-figure tabs via key_prefix.
+    """
+    p = key_prefix
+    st.write("**Edge labels (optional)** -- e.g. a condition like temperature")
+    ec1, ec2, ec3, ec4 = st.columns(4)
+    with ec1:
+        st.text_input("Top", key=f"{p}_edge_top")
+    with ec2:
+        st.text_input("Bottom", key=f"{p}_edge_bottom")
+    with ec3:
+        st.text_input("Left", key=f"{p}_edge_left")
+    with ec4:
+        st.text_input("Right", key=f"{p}_edge_right")
+
+    with st.expander("🔤 Symbol keyboard (Greek letters, units, etc.)"):
+        target_label = st.selectbox(
+            "Append symbols to", ["Top", "Bottom", "Left", "Right"], key=f"{p}_symkey_target"
+        )
+        target_key = f"{p}_edge_{target_label.lower()}"
+        symbol_keyboard(target_key, f"{p}_edge")
+
+
 tab_2d, tab_peakfit, tab_pf = st.tabs(
     ["2D image + line cuts", "Peak fitting", "Pole figure (cartesian)"]
 )
@@ -922,6 +1006,16 @@ def style_widgets(show_cmap: bool, show_sector_color: bool, key_prefix: str):
             st.number_input("Chi axis tick spacing (deg)", min_value=1.0, step=5.0,
                              key=f"{p}_tick_spacing", format="%.1f")
 
+    if show_cmap:
+        st.selectbox(
+            "Colour-scale type", ["log", "linear"], key=f"{p}_color_scale",
+            format_func=lambda v: "Logarithmic (10ⁿ ticks)" if v == "log" else "Linear (evenly-spaced ticks)",
+            help="Log (default) is the usual GIWAXS convention -- intensity "
+                 "spans orders of magnitude, so weak higher-order peaks stay "
+                 "visible next to the strong direct beam. Linear makes exact "
+                 "colorbar values easier to read but compresses weak features.",
+        )
+
     st.checkbox("Set explicit colour-scale range (instead of automatic percentile)",
                 key=f"{p}_use_manual_scale")
     if st.session_state[f"{p}_use_manual_scale"]:
@@ -936,6 +1030,8 @@ def style_widgets(show_cmap: bool, show_sector_color: bool, key_prefix: str):
             st.slider("Colour-scale minimum percentile", 0.0, 10.0, key=f"{p}_vmin_percentile")
         with pc2:
             st.slider("Colour-scale maximum percentile", 90.0, 100.0, key=f"{p}_vmax_percentile")
+
+    edge_label_inputs(p)
 
 
 # --------------------------------------------------------------------------- #
@@ -1049,6 +1145,9 @@ with tab_2d:
                 st.session_state["2d_font_family"], st.session_state["2d_font_size"],
                 st.session_state["2d_axis_labels"], st.session_state["2d_dpi"],
                 st.session_state["2d_tick_spacing"], st.session_state["2d_subtick_spacing"],
+                st.session_state["2d_color_scale"],
+                st.session_state["2d_edge_top"], st.session_state["2d_edge_bottom"],
+                st.session_state["2d_edge_left"], st.session_state["2d_edge_right"],
             )
             if img_cache_key not in d2_plot_cache:
                 fig2d = gc.plot_2d_image(
@@ -1064,6 +1163,11 @@ with tab_2d:
                     axis_label_style=st.session_state["2d_axis_labels"],
                     tick_spacing=st.session_state["2d_tick_spacing"],
                     subtick_spacing=st.session_state["2d_subtick_spacing"] or None,
+                    color_scale=st.session_state["2d_color_scale"],
+                    edge_label_top=st.session_state["2d_edge_top"] or None,
+                    edge_label_bottom=st.session_state["2d_edge_bottom"] or None,
+                    edge_label_left=st.session_state["2d_edge_left"] or None,
+                    edge_label_right=st.session_state["2d_edge_right"] or None,
                 )
                 buf = io.BytesIO()
                 fig2d.savefig(buf, format="png", dpi=st.session_state["2d_dpi"])
@@ -1083,6 +1187,8 @@ with tab_2d:
                     res["name"], angles, st.session_state["2d_line_color"],
                     st.session_state["2d_font_family"], st.session_state["2d_font_size"],
                     st.session_state["2d_dpi"], st.session_state["2d_linecut_tick_spacing"],
+                    st.session_state["2d_edge_top"], st.session_state["2d_edge_bottom"],
+                    st.session_state["2d_edge_left"], st.session_state["2d_edge_right"],
                 )
                 if lc_cache_key not in d2_plot_cache:
                     fig1d = gc.plot_1d_linecut(
@@ -1092,6 +1198,10 @@ with tab_2d:
                         font_family=st.session_state["2d_font_family"],
                         font_size=st.session_state["2d_font_size"],
                         tick_spacing=st.session_state["2d_linecut_tick_spacing"],
+                        edge_label_top=st.session_state["2d_edge_top"] or None,
+                        edge_label_bottom=st.session_state["2d_edge_bottom"] or None,
+                        edge_label_left=st.session_state["2d_edge_left"] or None,
+                        edge_label_right=st.session_state["2d_edge_right"] or None,
                     )
                     buf2 = io.BytesIO()
                     fig1d.savefig(buf2, format="png", dpi=st.session_state["2d_dpi"])
@@ -1306,6 +1416,8 @@ with tab_pf:
                     st.session_state["pf_line_color"], st.session_state["pf_font_family"],
                     st.session_state["pf_font_size"], st.session_state["pf_dpi"],
                     st.session_state["pf_tick_spacing"],
+                    st.session_state["pf_edge_top"], st.session_state["pf_edge_bottom"],
+                    st.session_state["pf_edge_left"], st.session_state["pf_edge_right"],
                 )
                 if cache_key not in pf_plot_cache:
                     # Cache miss -- data OR style actually changed for this
@@ -1320,6 +1432,10 @@ with tab_pf:
                         font_family=st.session_state["pf_font_family"],
                         font_size=st.session_state["pf_font_size"],
                         tick_spacing=st.session_state["pf_tick_spacing"],
+                        edge_label_top=st.session_state["pf_edge_top"] or None,
+                        edge_label_bottom=st.session_state["pf_edge_bottom"] or None,
+                        edge_label_left=st.session_state["pf_edge_left"] or None,
+                        edge_label_right=st.session_state["pf_edge_right"] or None,
                     )
                     buf = io.BytesIO()
                     fig.savefig(buf, format="png", dpi=st.session_state["pf_dpi"])
@@ -1359,204 +1475,200 @@ def _sanitize_tag(text: str) -> str:
 with tab_peakfit:
     st.header("Peak fitting")
 
-    if not st.session_state["processed_2d"]:
-        st.info(
-            "Process some 2D images + line cuts in the first tab before peak "
-            "fitting -- this tab fits peaks on the line cuts ALREADY computed "
-            "there; it doesn't reprocess raw TIFFs itself."
+    st.session_state.setdefault("peakfit_regions", [])
+    st.session_state.setdefault("peakfit_results", {})
+    st.session_state.setdefault("_peakfit_plot_cache", {})
+
+    linecut_lookup = {}
+    for res in st.session_state["processed_2d"] or []:
+        for angles, q, intensity in res["linecuts"]:
+            linecut_lookup[f"{res['name']} :: {angles} deg"] = (q, intensity)
+
+    st.subheader("1. Peak shape")
+    shape_col, k_col = st.columns(2)
+    with shape_col:
+        peak_shape = st.selectbox("Peak shape", ["gaussian", "lorentzian", "pseudo_voigt"],
+                                   key="peakfit_shape")
+    with k_col:
+        scherrer_k = st.number_input(
+            "Scherrer shape factor K", value=0.9, min_value=0.1, max_value=2.0, step=0.05,
+            key="peakfit_scherrer_k",
+            help="Coherence length = 2*pi*K / FWHM. 0.9 is the most common literature default.",
         )
-    else:
-        linecut_lookup = {}
-        for res in st.session_state["processed_2d"]:
-            for angles, q, intensity in res["linecuts"]:
-                linecut_lookup[f"{res['name']} :: {angles} deg"] = (q, intensity)
 
-        st.session_state.setdefault("peakfit_regions", [])
-        st.session_state.setdefault("peakfit_results", {})
-        st.session_state.setdefault("_peakfit_plot_cache", {})
-
-        st.subheader("1. Select line cuts to fit")
-        selected_keys = st.multiselect(
-            "Line cuts", list(linecut_lookup.keys()),
-            default=list(linecut_lookup.keys()), key="peakfit_selected_linecuts",
-        )
-
-        st.subheader("2. Peak shape")
-        shape_col, k_col = st.columns(2)
-        with shape_col:
-            peak_shape = st.selectbox("Peak shape", ["gaussian", "lorentzian", "pseudo_voigt"],
-                                       key="peakfit_shape")
-        with k_col:
-            scherrer_k = st.number_input(
-                "Scherrer shape factor K", value=0.9, min_value=0.1, max_value=2.0, step=0.05,
-                key="peakfit_scherrer_k",
-                help="Coherence length = 2*pi*K / FWHM. 0.9 is the most common literature default.",
-            )
-
-        st.subheader("3. Define fitting regions")
-        st.caption(
-            "Add regions manually, or describe them in plain language below -- "
-            "both add to the same list, which is used for \"Fit ALL\" below."
-        )
-        rc1, rc2, rc3, rc4 = st.columns([1, 1, 1.2, 0.7])
-        with rc1:
-            new_qmin = st.number_input("q min (1/Å)", value=0.20, format="%.4f", key="peakfit_new_qmin")
-        with rc2:
-            new_qmax = st.number_input("q max (1/Å)", value=0.40, format="%.4f", key="peakfit_new_qmax")
-        with rc3:
-            new_label = st.text_input("Label", value="(100)", key="peakfit_new_label")
-        with rc4:
-            st.markdown("<div style='height: 1.7em'></div>", unsafe_allow_html=True)
-            if st.button("+ Add region", key="peakfit_add_region"):
-                if new_qmax <= new_qmin:
-                    st.error("q max must be greater than q min.")
-                else:
-                    st.session_state["peakfit_regions"].append((new_qmin, new_qmax, new_label))
-                    st.rerun()
-
-        with st.expander("✨ Or describe peak(s) in plain language (AI, optional)"):
-            st.caption(
-                "Requires your own Anthropic API key (never stored or sent "
-                "anywhere except api.anthropic.com)."
-            )
-            peakfit_ai_prompt_widget("peakfit_regions", "batch")
-
-        if st.session_state["peakfit_regions"]:
-            st.write("Current regions:")
-            for i, (qmin, qmax, label) in enumerate(st.session_state["peakfit_regions"]):
-                rcol1, rcol2 = st.columns([5, 1])
-                rcol1.write(f"`{label}`: {qmin:.4f} - {qmax:.4f} 1/Å")
-                if rcol2.button("Remove", key=f"peakfit_remove_region_{i}"):
-                    st.session_state["peakfit_regions"].pop(i)
-                    st.rerun()
-        else:
-            st.caption("No regions defined yet.")
-
-        st.divider()
-        if st.button("🔬 Fit ALL selected line cuts", type="primary", key="peakfit_fit_all"):
-            if not st.session_state["peakfit_regions"]:
-                st.error("Add at least one fitting region first.")
-            elif not selected_keys:
-                st.error("Select at least one line cut to fit.")
+    st.subheader("2. Define fitting regions")
+    st.caption(
+        "Add regions manually, or describe them in plain language below -- "
+        "both add to the same list, which is used for \"Fit ALL\" below. You "
+        "can set these up before processing any data in the first tab."
+    )
+    rc1, rc2, rc3, rc4 = st.columns([1, 1, 1.2, 0.7])
+    with rc1:
+        new_qmin = st.number_input("q min (1/Å)", value=0.20, format="%.4f", key="peakfit_new_qmin")
+    with rc2:
+        new_qmax = st.number_input("q max (1/Å)", value=0.40, format="%.4f", key="peakfit_new_qmax")
+    with rc3:
+        new_label = st.text_input("Label", value="(100)", key="peakfit_new_label")
+    with rc4:
+        st.markdown("<div style='height: 1.7em'></div>", unsafe_allow_html=True)
+        if st.button("+ Add region", key="peakfit_add_region"):
+            if new_qmax <= new_qmin:
+                st.error("q max must be greater than q min.")
             else:
-                results = {}
-                n_ok = 0
-                for lc_key in selected_keys:
-                    q, intensity = linecut_lookup[lc_key]
-                    fit_list = []
-                    for q_min, q_max, label in st.session_state["peakfit_regions"]:
+                st.session_state["peakfit_regions"].append((new_qmin, new_qmax, new_label))
+                st.rerun()
+
+    with st.expander("✨ Or describe peak(s) in plain language (AI, optional)"):
+        peakfit_ai_prompt_widget("peakfit_regions", "batch")
+
+    if st.session_state["peakfit_regions"]:
+        st.write("Current regions:")
+        for i, (qmin, qmax, label) in enumerate(st.session_state["peakfit_regions"]):
+            rcol1, rcol2 = st.columns([5, 1])
+            rcol1.write(f"`{label}`: {qmin:.4f} - {qmax:.4f} 1/Å")
+            if rcol2.button("Remove", key=f"peakfit_remove_region_{i}"):
+                st.session_state["peakfit_regions"].pop(i)
+                st.rerun()
+    else:
+        st.caption("No regions defined yet.")
+
+    st.subheader("3. Select line cuts to fit")
+    if not linecut_lookup:
+        st.info(
+            "No line cuts available yet -- process some 2D images + line cuts "
+            "in the first tab, then come back here to select them. (The "
+            "regions you've defined above will still be here when you do.)"
+        )
+    selected_keys = st.multiselect(
+        "Line cuts", list(linecut_lookup.keys()),
+        default=list(linecut_lookup.keys()), key="peakfit_selected_linecuts",
+    )
+
+    st.divider()
+    if st.button("🔬 Fit ALL selected line cuts", type="primary", key="peakfit_fit_all"):
+        if not st.session_state["peakfit_regions"]:
+            st.error("Add at least one fitting region first.")
+        elif not selected_keys:
+            st.error("Select at least one line cut to fit.")
+        else:
+            results = {}
+            n_ok = 0
+            for lc_key in selected_keys:
+                q, intensity = linecut_lookup[lc_key]
+                fit_list = []
+                for q_min, q_max, label in st.session_state["peakfit_regions"]:
+                    try:
+                        fit_list.append(gc.fit_peak(
+                            q, intensity, q_min, q_max,
+                            shape=peak_shape, scherrer_k=scherrer_k, label=label,
+                        ))
+                        n_ok += 1
+                    except gc.GiwaxsError as exc:
+                        st.warning(f"{lc_key} -- {label}: {exc}")
+                results[lc_key] = fit_list
+                # Seed this line cut's OWN region list (for the per-line-cut
+                # refit box below) from the batch list, first time only --
+                # after that it's independently editable.
+                st.session_state.setdefault(
+                    f"peakfit_regions__{lc_key}", list(st.session_state["peakfit_regions"])
+                )
+            st.session_state["peakfit_results"] = results
+            st.session_state["_peakfit_plot_cache"] = {}  # invalidate stale cached plots
+            st.success(f"Fit {n_ok} peak(s) across {len(results)} line cut(s).")
+
+    if st.session_state["peakfit_results"]:
+        st.divider()
+        st.subheader("Results")
+        all_rows = []
+        plot_cache = st.session_state["_peakfit_plot_cache"]
+
+        for lc_key, fit_list in st.session_state["peakfit_results"].items():
+            if lc_key not in linecut_lookup:
+                continue  # stale entry from before a reprocess in tab 1
+            q, intensity = linecut_lookup[lc_key]
+            tag = _sanitize_tag(lc_key)
+            st.markdown(f"#### {lc_key}")
+
+            fit_signature = tuple(
+                (round(f["q0"], 6), round(f["fwhm"], 6), f["label"], f["shape"])
+                for f in fit_list
+            )
+            cache_key = (
+                lc_key, fit_signature, st.session_state["2d_line_color"],
+                st.session_state["2d_font_family"], st.session_state["2d_font_size"],
+                st.session_state["2d_dpi"], st.session_state["2d_linecut_tick_spacing"],
+            )
+            if cache_key not in plot_cache:
+                fig = gc.plot_linecut_with_fits(
+                    q, intensity, fit_list, out_path=None, title=lc_key,
+                    line_color=st.session_state["2d_line_color"],
+                    font_family=st.session_state["2d_font_family"],
+                    font_size=st.session_state["2d_font_size"],
+                    tick_spacing=st.session_state["2d_linecut_tick_spacing"],
+                )
+                buf = io.BytesIO()
+                fig.savefig(buf, format="png", dpi=st.session_state["2d_dpi"])
+                plt.close(fig)
+                plot_cache[cache_key] = buf.getvalue()
+            png_bytes = plot_cache[cache_key]
+
+            pf1, pf2 = st.columns([2, 1])
+            with pf1:
+                st.image(png_bytes)
+            pf2.download_button(
+                "Download plot PNG", png_bytes, file_name=f"{tag}_peakfit.png",
+                mime="image/png", key=f"peakfit_dlplot_{tag}",
+            )
+
+            with pf2.expander("Refit just this one"):
+                st.session_state.setdefault(
+                    f"peakfit_regions__{lc_key}", list(st.session_state["peakfit_regions"])
+                )
+                for j, (qmin, qmax, label) in enumerate(st.session_state[f"peakfit_regions__{lc_key}"]):
+                    st.caption(f"`{label}`: {qmin:.4f} - {qmax:.4f} 1/Å")
+                peakfit_ai_prompt_widget(f"peakfit_regions__{lc_key}", f"single_{tag}")
+                if st.button("Refit this line cut", key=f"peakfit_refit_{tag}"):
+                    new_fit_list = []
+                    for q_min, q_max, label in st.session_state[f"peakfit_regions__{lc_key}"]:
                         try:
-                            fit_list.append(gc.fit_peak(
+                            new_fit_list.append(gc.fit_peak(
                                 q, intensity, q_min, q_max,
                                 shape=peak_shape, scherrer_k=scherrer_k, label=label,
                             ))
-                            n_ok += 1
                         except gc.GiwaxsError as exc:
-                            st.warning(f"{lc_key} -- {label}: {exc}")
-                    results[lc_key] = fit_list
-                    # Seed this line cut's OWN region list (for the per-line-cut
-                    # refit box below) from the batch list, first time only --
-                    # after that it's independently editable.
-                    st.session_state.setdefault(
-                        f"peakfit_regions__{lc_key}", list(st.session_state["peakfit_regions"])
-                    )
-                st.session_state["peakfit_results"] = results
-                st.session_state["_peakfit_plot_cache"] = {}  # invalidate stale cached plots
-                st.success(f"Fit {n_ok} peak(s) across {len(results)} line cut(s).")
+                            st.warning(f"{label}: {exc}")
+                    st.session_state["peakfit_results"][lc_key] = new_fit_list
+                    st.rerun()
 
-        if st.session_state["peakfit_results"]:
-            st.divider()
-            st.subheader("Results")
-            all_rows = []
-            plot_cache = st.session_state["_peakfit_plot_cache"]
-
-            for lc_key, fit_list in st.session_state["peakfit_results"].items():
-                if lc_key not in linecut_lookup:
-                    continue  # stale entry from before a reprocess in tab 1
-                q, intensity = linecut_lookup[lc_key]
-                tag = _sanitize_tag(lc_key)
-                st.markdown(f"#### {lc_key}")
-
-                fit_signature = tuple(
-                    (round(f["q0"], 6), round(f["fwhm"], 6), f["label"], f["shape"])
-                    for f in fit_list
-                )
-                cache_key = (
-                    lc_key, fit_signature, st.session_state["2d_line_color"],
-                    st.session_state["2d_font_family"], st.session_state["2d_font_size"],
-                    st.session_state["2d_dpi"], st.session_state["2d_linecut_tick_spacing"],
-                )
-                if cache_key not in plot_cache:
-                    fig = gc.plot_linecut_with_fits(
-                        q, intensity, fit_list, out_path=None, title=lc_key,
-                        line_color=st.session_state["2d_line_color"],
-                        font_family=st.session_state["2d_font_family"],
-                        font_size=st.session_state["2d_font_size"],
-                        tick_spacing=st.session_state["2d_linecut_tick_spacing"],
-                    )
-                    buf = io.BytesIO()
-                    fig.savefig(buf, format="png", dpi=st.session_state["2d_dpi"])
-                    plt.close(fig)
-                    plot_cache[cache_key] = buf.getvalue()
-                png_bytes = plot_cache[cache_key]
-
-                pf1, pf2 = st.columns([2, 1])
-                with pf1:
-                    st.image(png_bytes)
-                pf2.download_button(
-                    "Download plot PNG", png_bytes, file_name=f"{tag}_peakfit.png",
-                    mime="image/png", key=f"peakfit_dlplot_{tag}",
-                )
-
-                with pf2.expander("Refit just this one"):
-                    st.session_state.setdefault(
-                        f"peakfit_regions__{lc_key}", list(st.session_state["peakfit_regions"])
-                    )
-                    for j, (qmin, qmax, label) in enumerate(st.session_state[f"peakfit_regions__{lc_key}"]):
-                        st.caption(f"`{label}`: {qmin:.4f} - {qmax:.4f} 1/Å")
-                    peakfit_ai_prompt_widget(f"peakfit_regions__{lc_key}", f"single_{tag}")
-                    if st.button("Refit this line cut", key=f"peakfit_refit_{tag}"):
-                        new_fit_list = []
-                        for q_min, q_max, label in st.session_state[f"peakfit_regions__{lc_key}"]:
-                            try:
-                                new_fit_list.append(gc.fit_peak(
-                                    q, intensity, q_min, q_max,
-                                    shape=peak_shape, scherrer_k=scherrer_k, label=label,
-                                ))
-                            except gc.GiwaxsError as exc:
-                                st.warning(f"{label}: {exc}")
-                        st.session_state["peakfit_results"][lc_key] = new_fit_list
-                        st.rerun()
-
-                if fit_list:
-                    table_rows = [{
-                        "Label": f["label"], "q [1/Å]": round(f["q0"], 5),
-                        "d-spacing [Å]": round(f["d_spacing"], 4),
-                        "FWHM [1/Å]": round(f["fwhm"], 5),
-                        "L_c [Å]": round(f["coherence_length"], 2),
-                        "Peak Intensity": round(f["peak_intensity"], 2),
-                        "Peak Area": round(f["peak_area"], 2),
-                        "R\u00b2": round(f["r_squared"], 4),
-                    } for f in fit_list]
-                    df = pd.DataFrame(table_rows)
-                    st.dataframe(df, width='stretch')
-                    st.download_button(
-                        "Download table (.csv)", df.to_csv(index=False),
-                        file_name=f"{tag}_peakfit.csv", mime="text/csv",
-                        key=f"peakfit_dltable_{tag}",
-                    )
-                    for row in table_rows:
-                        row_with_source = {"Line cut": lc_key, **row}
-                        all_rows.append(row_with_source)
-                else:
-                    st.caption("No successfully fit peaks for this line cut.")
-
-            if all_rows:
-                st.divider()
-                combined_df = pd.DataFrame(all_rows)
+            if fit_list:
+                table_rows = [{
+                    "Label": f["label"], "q [1/Å]": round(f["q0"], 5),
+                    "d-spacing [Å]": round(f["d_spacing"], 4),
+                    "FWHM [1/Å]": round(f["fwhm"], 5),
+                    "L_c [Å]": round(f["coherence_length"], 2),
+                    "Peak Intensity": round(f["peak_intensity"], 2),
+                    "Peak Area": round(f["peak_area"], 2),
+                    "R\u00b2": round(f["r_squared"], 4),
+                } for f in fit_list]
+                df = pd.DataFrame(table_rows)
+                st.dataframe(df, width='stretch')
                 st.download_button(
-                    "⬇️ Download ALL peak fit results (CSV)",
-                    combined_df.to_csv(index=False),
-                    file_name="giwaxs_peak_fit_results.csv", mime="text/csv",
-                    key="peakfit_dl_all",
+                    "Download table (.csv)", df.to_csv(index=False),
+                    file_name=f"{tag}_peakfit.csv", mime="text/csv",
+                    key=f"peakfit_dltable_{tag}",
                 )
+                for row in table_rows:
+                    row_with_source = {"Line cut": lc_key, **row}
+                    all_rows.append(row_with_source)
+            else:
+                st.caption("No successfully fit peaks for this line cut.")
+
+        if all_rows:
+            st.divider()
+            combined_df = pd.DataFrame(all_rows)
+            st.download_button(
+                "⬇️ Download ALL peak fit results (CSV)",
+                combined_df.to_csv(index=False),
+                file_name="giwaxs_peak_fit_results.csv", mime="text/csv",
+                key="peakfit_dl_all",
+            )
