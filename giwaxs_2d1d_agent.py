@@ -46,7 +46,7 @@ import sys
 from typing import List, Tuple, Optional
 
 import numpy as np
-from matplotlib.colors import LogNorm
+from matplotlib.colors import LogNorm, Normalize
 from matplotlib.ticker import MultipleLocator
 import matplotlib.pyplot as plt
 
@@ -90,6 +90,10 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                     help=f"Matplotlib colormap for the 2D image. Common choices: "
                          f"{', '.join(gc.COMMON_COLORMAPS)} (any valid matplotlib "
                          f"colormap name also works).")
+    p.add_argument("--color-scale", choices=["log", "linear"], default="log",
+                    help="Colour mapping for the 2D image: 'log' (default) shows "
+                         "scientific-notation colorbar ticks (10^n); 'linear' shows "
+                         "evenly-spaced round-number ticks (100, 200, 300, ...).")
     p.add_argument("--vmin", type=float, default=None,
                     help="Explicit colour-scale minimum (intensity units) for "
                          "the 2D image, overriding --vmin-percentile.")
@@ -211,6 +215,7 @@ def process_file(tiff_path: str, fi, get_unit_fiber, mask, args, out_dirs, fabio
         font_family=args.font_family, font_size=args.font_size,
         dpi=args.dpi, axis_label_style=args.axis_labels,
         tick_spacing=args.tick_spacing, subtick_spacing=args.subtick_spacing,
+        color_scale=args.color_scale,
     )
     print(f"  Saved 2D image: {img_out_path}")
 
@@ -246,7 +251,9 @@ def process_file(tiff_path: str, fi, get_unit_fiber, mask, args, out_dirs, fabio
             fig, ax = plt.subplots(1, 2, width_ratios=[1, 0.05], figsize=gc.DEFAULT_FIGSIZE)
             v_lo, v_hi = gc.resolve_vmin_vmax(res_I, args.vmin_percentile, args.vmin, args.vmax,
                                                args.vmax_percentile)
-            mesh = ax[0].pcolormesh(res_qx, res_qy, res_I, norm=LogNorm(vmin=v_lo, vmax=v_hi),
+            sector_norm = (LogNorm(vmin=v_lo, vmax=v_hi) if args.color_scale == "log"
+                            else Normalize(vmin=v_lo, vmax=v_hi))
+            mesh = ax[0].pcolormesh(res_qx, res_qy, res_I, norm=sector_norm,
                                      cmap=args.cmap)
             ax[0].set_facecolor("black")
             ax[0].set_aspect("equal")
