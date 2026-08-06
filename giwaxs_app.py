@@ -292,8 +292,17 @@ keys you can confidently infer, omitting any you cannot:
 - "font_size": a number between 6 and 30
 - "vmin": a positive number (colour-scale minimum, only if the user gave/implied a specific intensity value)
 - "vmax": a positive number (colour-scale maximum, only if the user gave/implied a specific intensity value)
+- "edge_top", "edge_bottom", "edge_left", "edge_right": short text labels to place OUTSIDE the plot along that
+  edge (e.g. a condition like "25 C" or a sample name) -- only if the user is clearly asking to add/change one
+- "edge_top_rotation", "edge_bottom_rotation", "edge_left_rotation", "edge_right_rotation": rotation in degrees,
+  counterclockwise from horizontal, for the corresponding edge label -- only if the user explicitly asks for a
+  specific angle or orientation for that label. Defaults if not asked about: top/bottom 0 (horizontal), left 90
+  (reads bottom-to-top), right 270 (reads top-to-bottom) -- don't set these unless the user wants something
+  DIFFERENT from that default.
 Example: user says "make the line red and bump up the font size" ->
 {"line_color": "red", "font_size": 16}
+Example: user says "add a label on top saying Annealing Series, and tilt the right-side label 45 degrees" ->
+{"edge_top": "Annealing Series", "edge_right_rotation": 45}
 """
 
 
@@ -332,7 +341,10 @@ def render_ai_assistant():
                 else:
                     applied = []
                     for key in ("cmap", "line_color", "sector_line_color",
-                                "font_family", "font_size", "vmin", "vmax"):
+                                "font_family", "font_size", "vmin", "vmax",
+                                "edge_top", "edge_bottom", "edge_left", "edge_right",
+                                "edge_top_rotation", "edge_bottom_rotation",
+                                "edge_left_rotation", "edge_right_rotation"):
                         if key in result:
                             for prefix in ("2d_", "pf_"):
                                 st.session_state[prefix + key] = result[key]
@@ -462,6 +474,7 @@ def build_2d_results_zip(qip_range, qoop_range) -> bytes:
                 edge_label_bottom=st.session_state["2d_edge_bottom"] or None,
                 edge_label_left=st.session_state["2d_edge_left"] or None,
                 edge_label_right=st.session_state["2d_edge_right"] or None,
+                edge_label_rotations=edge_rotations_dict("2d"),
             )
             img_buf = io.BytesIO()
             fig2d.savefig(img_buf, format="png", dpi=st.session_state["2d_dpi"])
@@ -481,6 +494,7 @@ def build_2d_results_zip(qip_range, qoop_range) -> bytes:
                     edge_label_bottom=st.session_state["2d_edge_bottom"] or None,
                     edge_label_left=st.session_state["2d_edge_left"] or None,
                     edge_label_right=st.session_state["2d_edge_right"] or None,
+                    edge_label_rotations=edge_rotations_dict("2d"),
                 )
                 lc_buf = io.BytesIO()
                 fig1d.savefig(lc_buf, format="png", dpi=st.session_state["2d_dpi"])
@@ -517,6 +531,7 @@ def build_pf_results_zip(dq, chi_plot_range) -> bytes:
                     edge_label_bottom=st.session_state["pf_edge_bottom"] or None,
                     edge_label_left=st.session_state["pf_edge_left"] or None,
                     edge_label_right=st.session_state["pf_edge_right"] or None,
+                    edge_label_rotations=edge_rotations_dict("pf"),
                 )
                 img_buf = io.BytesIO()
                 fig.savefig(img_buf, format="png", dpi=st.session_state["pf_dpi"])
@@ -910,29 +925,47 @@ def symbol_keyboard(target_key: str, widget_key_suffix: str):
                     st.rerun()
 
 
+def edge_rotations_dict(key_prefix: str) -> dict:
+    """Read the 4 edge-label rotation angles from session_state as the
+    kwargs dict add_edge_labels/plot_*'s edge_label_rotations expects."""
+    p = key_prefix
+    return {
+        "top_rotation": st.session_state[f"{p}_edge_top_rotation"],
+        "bottom_rotation": st.session_state[f"{p}_edge_bottom_rotation"],
+        "left_rotation": st.session_state[f"{p}_edge_left_rotation"],
+        "right_rotation": st.session_state[f"{p}_edge_right_rotation"],
+    }
+
+
+def edge_rotations_cache_tuple(key_prefix: str) -> tuple:
+    """Same 4 values as edge_rotations_dict, as a tuple for cache keys."""
+    d = edge_rotations_dict(key_prefix)
+    return (d["top_rotation"], d["bottom_rotation"], d["left_rotation"], d["right_rotation"])
+
+
 def edge_label_inputs(key_prefix: str):
     """Render the four optional edge-label text inputs (top/bottom/left/
-    right) plus a shared symbol keyboard that can append to whichever one
-    is selected. Shared across the 2D and pole-figure tabs via key_prefix.
+    right), each with its own popover holding a rotation-angle control and
+    a small symbol keyboard -- no separate "which field" selector, since
+    which popover you open already says which field it applies to. Shared
+    across the 2D and pole-figure tabs via key_prefix.
     """
     p = key_prefix
+    default_rotation = {"Top": 0.0, "Bottom": 0.0, "Left": 90.0, "Right": 270.0}
     st.write("**Edge labels (optional)** -- e.g. a condition like temperature")
     ec1, ec2, ec3, ec4 = st.columns(4)
-    with ec1:
-        st.text_input("Top", key=f"{p}_edge_top")
-    with ec2:
-        st.text_input("Bottom", key=f"{p}_edge_bottom")
-    with ec3:
-        st.text_input("Left", key=f"{p}_edge_left")
-    with ec4:
-        st.text_input("Right", key=f"{p}_edge_right")
-
-    with st.expander("🔤 Symbol keyboard (Greek letters, units, etc.)"):
-        target_label = st.selectbox(
-            "Append symbols to", ["Top", "Bottom", "Left", "Right"], key=f"{p}_symkey_target"
-        )
-        target_key = f"{p}_edge_{target_label.lower()}"
-        symbol_keyboard(target_key, f"{p}_edge")
+    for col, label in zip((ec1, ec2, ec3, ec4), ("Top", "Bottom", "Left", "Right")):
+        with col:
+            field_key = f"{p}_edge_{label.lower()}"
+            rot_key = f"{field_key}_rotation"
+            st.session_state.setdefault(rot_key, default_rotation[label])
+            st.text_input(label, key=field_key)
+            with st.popover("🔤 ∠", width="stretch"):
+                st.number_input(
+                    "Rotation (deg, CCW from horizontal)", step=15.0, key=rot_key,
+                    help=f"Default for {label}: {default_rotation[label]:g}°.",
+                )
+                symbol_keyboard(field_key, f"{p}_edge_{label.lower()}")
 
 
 tab_2d, tab_peakfit, tab_pf = st.tabs(
@@ -1148,6 +1181,7 @@ with tab_2d:
                 st.session_state["2d_color_scale"],
                 st.session_state["2d_edge_top"], st.session_state["2d_edge_bottom"],
                 st.session_state["2d_edge_left"], st.session_state["2d_edge_right"],
+                edge_rotations_cache_tuple("2d"),
             )
             if img_cache_key not in d2_plot_cache:
                 fig2d = gc.plot_2d_image(
@@ -1168,6 +1202,7 @@ with tab_2d:
                     edge_label_bottom=st.session_state["2d_edge_bottom"] or None,
                     edge_label_left=st.session_state["2d_edge_left"] or None,
                     edge_label_right=st.session_state["2d_edge_right"] or None,
+                    edge_label_rotations=edge_rotations_dict("2d"),
                 )
                 buf = io.BytesIO()
                 fig2d.savefig(buf, format="png", dpi=st.session_state["2d_dpi"])
@@ -1189,6 +1224,7 @@ with tab_2d:
                     st.session_state["2d_dpi"], st.session_state["2d_linecut_tick_spacing"],
                     st.session_state["2d_edge_top"], st.session_state["2d_edge_bottom"],
                     st.session_state["2d_edge_left"], st.session_state["2d_edge_right"],
+                    edge_rotations_cache_tuple("2d"),
                 )
                 if lc_cache_key not in d2_plot_cache:
                     fig1d = gc.plot_1d_linecut(
@@ -1202,6 +1238,7 @@ with tab_2d:
                         edge_label_bottom=st.session_state["2d_edge_bottom"] or None,
                         edge_label_left=st.session_state["2d_edge_left"] or None,
                         edge_label_right=st.session_state["2d_edge_right"] or None,
+                        edge_label_rotations=edge_rotations_dict("2d"),
                     )
                     buf2 = io.BytesIO()
                     fig1d.savefig(buf2, format="png", dpi=st.session_state["2d_dpi"])
@@ -1418,6 +1455,7 @@ with tab_pf:
                     st.session_state["pf_tick_spacing"],
                     st.session_state["pf_edge_top"], st.session_state["pf_edge_bottom"],
                     st.session_state["pf_edge_left"], st.session_state["pf_edge_right"],
+                    edge_rotations_cache_tuple("pf"),
                 )
                 if cache_key not in pf_plot_cache:
                     # Cache miss -- data OR style actually changed for this
@@ -1436,6 +1474,7 @@ with tab_pf:
                         edge_label_bottom=st.session_state["pf_edge_bottom"] or None,
                         edge_label_left=st.session_state["pf_edge_left"] or None,
                         edge_label_right=st.session_state["pf_edge_right"] or None,
+                        edge_label_rotations=edge_rotations_dict("pf"),
                     )
                     buf = io.BytesIO()
                     fig.savefig(buf, format="png", dpi=st.session_state["pf_dpi"])
