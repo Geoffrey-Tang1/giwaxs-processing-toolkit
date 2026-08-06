@@ -975,8 +975,8 @@ def edge_label_inputs(key_prefix: str):
         help=f"Applies to the {target_label} label. Default for {target_label}: "
              f"{default_rotation[target_label]:g}°.",
     )
-    st.caption(f"Symbol keyboard (adds to the {target_label} label):")
-    symbol_keyboard(target_key, f"{p}_edge_shared")
+    with st.expander(f"Symbol keyboard (adds to the {target_label} label)"):
+        symbol_keyboard(target_key, f"{p}_edge_shared")
 
 
 tab_2d, tab_peakfit, tab_pf = st.tabs(
