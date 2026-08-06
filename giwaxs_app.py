@@ -945,9 +945,9 @@ def edge_rotations_cache_tuple(key_prefix: str) -> tuple:
 
 def edge_label_inputs(key_prefix: str):
     """Render the four optional edge-label text inputs (top/bottom/left/
-    right), each with its own popover holding a rotation-angle control and
-    a small symbol keyboard -- no separate "which field" selector, since
-    which popover you open already says which field it applies to. Shared
+    right), plus ONE shared symbol keyboard and rotation control below
+    them that applies to whichever field is picked with the segmented
+    control -- not a dropdown, not a separate popover per field. Shared
     across the 2D and pole-figure tabs via key_prefix.
     """
     p = key_prefix
@@ -960,12 +960,23 @@ def edge_label_inputs(key_prefix: str):
             rot_key = f"{field_key}_rotation"
             st.session_state.setdefault(rot_key, default_rotation[label])
             st.text_input(label, key=field_key)
-            with st.popover("🔤 ∠", width="stretch"):
-                st.number_input(
-                    "Rotation (deg, CCW from horizontal)", step=15.0, key=rot_key,
-                    help=f"Default for {label}: {default_rotation[label]:g}°.",
-                )
-                symbol_keyboard(field_key, f"{p}_edge_{label.lower()}")
+
+    st.write("Edit label:")
+    target_label = st.segmented_control(
+        "Edit label", ("Top", "Bottom", "Left", "Right"), default="Top",
+        key=f"{p}_edge_target", label_visibility="collapsed",
+    ) or "Top"
+    target_key = f"{p}_edge_{target_label.lower()}"
+    target_rot_key = f"{target_key}_rotation"
+
+    st.number_input(
+        "Rotation angle (degrees, counterclockwise from horizontal)",
+        step=15.0, key=target_rot_key,
+        help=f"Applies to the {target_label} label. Default for {target_label}: "
+             f"{default_rotation[target_label]:g}°.",
+    )
+    st.caption(f"Symbol keyboard (adds to the {target_label} label):")
+    symbol_keyboard(target_key, f"{p}_edge_shared")
 
 
 tab_2d, tab_peakfit, tab_pf = st.tabs(
