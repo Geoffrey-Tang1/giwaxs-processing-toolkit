@@ -106,6 +106,14 @@ if _pending_symbol:
     _target_key, _sym = _pending_symbol
     st.session_state[_target_key] = st.session_state.get(_target_key, "") + _sym
 
+# Same pattern again, for the per-tab edge-label AI box: it can set several
+# keys at once (text + rotation for one or more edges), so this is a dict
+# rather than a single append.
+_pending_edge_ai = st.session_state.pop("_pending_edge_ai_update", None)
+if _pending_edge_ai:
+    for _k, _v in _pending_edge_ai.items():
+        st.session_state[_k] = _v
+
 
 # --------------------------------------------------------------------------- #
 # AI provider configuration -- centralized, backend-configured (via Streamlit
@@ -977,6 +985,41 @@ def edge_label_inputs(key_prefix: str):
     )
     with st.expander(f"Symbol keyboard (adds to the {target_label} label)"):
         symbol_keyboard(target_key, f"{p}_edge_shared")
+
+    with st.expander("✨ Describe edge labels with AI (optional)"):
+        ai_availability_notice("AI edge-label assistance")
+        edge_ai_request = st.text_input(
+            "Describe the edge label(s) you want",
+            placeholder="e.g. 'put Annealing Temperature on top, and tilt the right label 45 degrees'",
+            key=f"{p}_edge_ai_request",
+        )
+        if st.button("Apply with AI", key=f"{p}_edge_ai_button"):
+            if not edge_ai_request:
+                st.error("Please describe what you'd like changed.")
+            else:
+                try:
+                    with st.spinner("Asking the AI..."):
+                        edge_result = call_ai_style_assistant(edge_ai_request)
+                except ImportError as exc:
+                    st.error(f"A required package isn't installed: {exc}")
+                except Exception as exc:  # noqa: BLE001 -- surfaced to the user directly
+                    st.error(f"AI request failed: {exc}")
+                else:
+                    edge_keys = ("edge_top", "edge_bottom", "edge_left", "edge_right",
+                                 "edge_top_rotation", "edge_bottom_rotation",
+                                 "edge_left_rotation", "edge_right_rotation")
+                    updates = {f"{p}_{k}": edge_result[k] for k in edge_keys if k in edge_result}
+                    if updates:
+                        # Can't write straight to session_state here -- this
+                        # tab's edge-label widgets were already instantiated
+                        # earlier this run. Defer via the pending-update
+                        # pattern (applied at the top of the script, before
+                        # any widgets exist, on the next run) instead.
+                        st.session_state["_pending_edge_ai_update"] = updates
+                        st.success("Applied: " + ", ".join(f"{k}={v}" for k, v in updates.items()))
+                        st.rerun()
+                    else:
+                        st.warning("The AI didn't return any recognized edge-label keys.")
 
 
 tab_2d, tab_peakfit, tab_pf = st.tabs(
