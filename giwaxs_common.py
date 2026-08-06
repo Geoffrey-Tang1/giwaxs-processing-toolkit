@@ -1222,13 +1222,19 @@ DEFAULT_DPI = 400
 
 def add_edge_labels(fig, top: Optional[str] = None, bottom: Optional[str] = None,
                      left: Optional[str] = None, right: Optional[str] = None,
-                     fontsize: Optional[float] = None):
+                     fontsize: Optional[float] = None,
+                     top_rotation: float = 0.0, bottom_rotation: float = 0.0,
+                     left_rotation: float = 90.0, right_rotation: float = 270.0):
     """Add optional text annotations along the four edges of a figure,
     OUTSIDE the plot axes -- e.g. a condition label like "25 C" or
     "Sample A" when building a multi-panel comparison across a series.
-    top/bottom render as normal horizontal text centred along that edge;
-    left/right render rotated 90 degrees, centred along that edge (like a
-    secondary axis label). Any of the four may be left as None to omit it.
+    Rotation is in degrees, counterclockwise from horizontal (matplotlib's
+    usual text-rotation convention). Defaults: top/bottom horizontal (0),
+    left rotated 90 (reads bottom-to-top), right rotated 270 i.e. -90
+    (reads top-to-bottom) -- the conventional MIRRORED style used for
+    axis labels on opposite sides of a plot, so both read comfortably
+    outward. Override any of the four freely if you want a different
+    convention. Any of the four labels may be left as None to omit it.
     Call this AFTER the plot's own layout is otherwise finalized but
     BEFORE saving -- it reserves a small margin via subplots_adjust so
     the labels don't overlap the axes or get clipped at the figure edge.
@@ -1246,13 +1252,13 @@ def add_edge_labels(fig, top: Optional[str] = None, bottom: Optional[str] = None
     )
     common = dict(fontsize=fontsize, transform=fig.transFigure)
     if top:
-        fig.text(0.5, 0.99, top, ha="center", va="top", **common)
+        fig.text(0.5, 0.99, top, ha="center", va="top", rotation=top_rotation, **common)
     if bottom:
-        fig.text(0.5, 0.01, bottom, ha="center", va="bottom", **common)
+        fig.text(0.5, 0.01, bottom, ha="center", va="bottom", rotation=bottom_rotation, **common)
     if left:
-        fig.text(0.01, 0.5, left, ha="left", va="center", rotation=90, **common)
+        fig.text(0.01, 0.5, left, ha="left", va="center", rotation=left_rotation, **common)
     if right:
-        fig.text(0.99, 0.5, right, ha="right", va="center", rotation=270, **common)
+        fig.text(0.99, 0.5, right, ha="right", va="center", rotation=right_rotation, **common)
 
 
 def plot_2d_image(qx, qy, intensity, out_path=None, qlim_x=None, qlim_y=None,
@@ -1263,6 +1269,7 @@ def plot_2d_image(qx, qy, intensity, out_path=None, qlim_x=None, qlim_y=None,
                    dpi: int = DEFAULT_DPI, figsize: Tuple[float, float] = DEFAULT_FIGSIZE,
                    edge_label_top: Optional[str] = None, edge_label_bottom: Optional[str] = None,
                    edge_label_left: Optional[str] = None, edge_label_right: Optional[str] = None,
+                   edge_label_rotations: Optional[Dict[str, float]] = None,
                    axis_label_style: str = "xyz", tick_spacing: float = 0.5,
                    subtick_spacing: Optional[float] = None, color_scale: str = "log"):
     """2D GIWAXS q-space image -- deliberately has NO title (kept plain for
@@ -1320,7 +1327,8 @@ def plot_2d_image(qx, qy, intensity, out_path=None, qlim_x=None, qlim_y=None,
         cbar.ax.tick_params(which="both", direction="in")
         fig.tight_layout()
         add_edge_labels(fig, top=edge_label_top, bottom=edge_label_bottom,
-                         left=edge_label_left, right=edge_label_right, fontsize=font_size)
+                         left=edge_label_left, right=edge_label_right, fontsize=font_size,
+                         **(edge_label_rotations or {}))
         if out_path:
             fig.savefig(out_path, dpi=dpi)
             plt.close(fig)
@@ -1370,7 +1378,8 @@ def plot_1d_linecut(q, intensity, out_path=None, angle_range=(0, 0), title=None,
                      q_range: Tuple[float, float] = (0.15, 2.0), tick_spacing: float = 0.3,
                      subtick_spacing: Optional[float] = None,
                      edge_label_top: Optional[str] = None, edge_label_bottom: Optional[str] = None,
-                     edge_label_left: Optional[str] = None, edge_label_right: Optional[str] = None):
+                     edge_label_left: Optional[str] = None, edge_label_right: Optional[str] = None,
+                     edge_label_rotations: Optional[Dict[str, float]] = None):
     """1D line-cut plot: log-scaled q-axis, but with major tick MARKS placed
     at round linear-spaced values (0.3, 0.6, 0.9, ...) rather than the
     log-scale default (powers of ten / 1-2-5 pattern) -- matching the
@@ -1405,7 +1414,8 @@ def plot_1d_linecut(q, intensity, out_path=None, angle_range=(0, 0), title=None,
         ax.set_title(title or f"Line profile: {angle_range[0]} to {angle_range[1]} deg")
         fig.tight_layout()
         add_edge_labels(fig, top=edge_label_top, bottom=edge_label_bottom,
-                         left=edge_label_left, right=edge_label_right, fontsize=font_size)
+                         left=edge_label_left, right=edge_label_right, fontsize=font_size,
+                         **(edge_label_rotations or {}))
         if out_path:
             fig.savefig(out_path, dpi=dpi)
             plt.close(fig)
@@ -1495,7 +1505,8 @@ def plot_chi_intensity_profile(chi_axis, profile, out_path=None, target_q=0.0, d
                                 figsize: Tuple[float, float] = DEFAULT_FIGSIZE,
                                 tick_spacing: float = 20.0,
                                 edge_label_top: Optional[str] = None, edge_label_bottom: Optional[str] = None,
-                                edge_label_left: Optional[str] = None, edge_label_right: Optional[str] = None):
+                                edge_label_left: Optional[str] = None, edge_label_right: Optional[str] = None,
+                                edge_label_rotations: Optional[Dict[str, float]] = None):
     """Intensity-vs-chi 'pole figure' in the Cartesian/log-y style commonly
     used in the GIWAXS literature (e.g. for tracking a peak's orientation
     across an annealing series): chi (tilt from the surface normal, signed,
@@ -1545,7 +1556,8 @@ def plot_chi_intensity_profile(chi_axis, profile, out_path=None, target_q=0.0, d
 
         fig.tight_layout()
         add_edge_labels(fig, top=edge_label_top, bottom=edge_label_bottom,
-                         left=edge_label_left, right=edge_label_right, fontsize=font_size)
+                         left=edge_label_left, right=edge_label_right, fontsize=font_size,
+                         **(edge_label_rotations or {}))
         if out_path:
             fig.savefig(out_path, dpi=dpi)
             plt.close(fig)
@@ -1805,7 +1817,8 @@ def plot_linecut_with_fits(q, intensity, fits: List[Dict[str, object]], out_path
                             tick_spacing: Optional[float] = 0.3,
                             subtick_spacing: Optional[float] = None,
                             edge_label_top: Optional[str] = None, edge_label_bottom: Optional[str] = None,
-                            edge_label_left: Optional[str] = None, edge_label_right: Optional[str] = None):
+                            edge_label_left: Optional[str] = None, edge_label_right: Optional[str] = None,
+                            edge_label_rotations: Optional[Dict[str, float]] = None):
     """Plot a 1D line-cut curve with one or more fitted peaks (each a dict
     from fit_peak/fit_multiple_peaks) overlaid: the fitted model curve
     drawn on top of the raw data, the fit window lightly shaded, and the
@@ -1848,7 +1861,8 @@ def plot_linecut_with_fits(q, intensity, fits: List[Dict[str, object]], out_path
             ax.set_title(title, fontsize=10)
         fig.tight_layout()
         add_edge_labels(fig, top=edge_label_top, bottom=edge_label_bottom,
-                         left=edge_label_left, right=edge_label_right, fontsize=font_size)
+                         left=edge_label_left, right=edge_label_right, fontsize=font_size,
+                         **(edge_label_rotations or {}))
         if out_path:
             fig.savefig(out_path, dpi=dpi)
             plt.close(fig)
