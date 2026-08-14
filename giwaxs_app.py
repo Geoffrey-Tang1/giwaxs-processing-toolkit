@@ -1111,6 +1111,17 @@ def style_widgets(show_cmap: bool, show_sector_color: bool, key_prefix: str):
             st.number_input("Colour-scale min", key=f"{p}_vmin", format="%.4g")
         with c2:
             st.number_input("Colour-scale max", key=f"{p}_vmax", format="%.4g")
+        # A non-positive value here is fatal to a log colour scale (log(0) is
+        # -inf), and an empty number box reads back as 0 -- so this is easy to
+        # hit by accident. Rendering no longer crashes on it (resolve_vmin_vmax
+        # falls back), but silently substituting different numbers than the
+        # ones on screen would be confusing, so say what happened and why.
+        scale_problem = gc.validate_manual_color_scale(
+            st.session_state[f"{p}_vmin"], st.session_state[f"{p}_vmax"],
+            color_scale=st.session_state.get(f"{p}_color_scale", "log"),
+        )
+        if scale_problem:
+            st.warning(f"{scale_problem} Using the automatic range instead for now.")
     else:
         pc1, pc2 = st.columns(2)
         with pc1:
