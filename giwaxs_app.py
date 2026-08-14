@@ -22,6 +22,7 @@ Run with:
 from __future__ import annotations
 
 import io
+import re
 import zipfile
 import json
 import os
@@ -78,8 +79,8 @@ st.session_state.setdefault("processed_2d", None)   # cached heavy-computation r
 st.session_state.setdefault("processed_pf", None)
 st.session_state.setdefault("calibration_confirmed", False)
 st.session_state.setdefault("calibration_diagnostic_path", None)
-st.session_state.setdefault("_2d_zip_bytes", None)
-st.session_state.setdefault("_pf_zip_bytes", None)
+st.session_state.setdefault("_2d_zip_path", None)
+st.session_state.setdefault("_pf_zip_path", None)
 st.session_state.setdefault("_2d_plot_png_cache", {})
 st.session_state.setdefault("_pf_plot_png_cache", {})
 
@@ -445,12 +446,68 @@ def peakfit_ai_prompt_widget(target_list_key: str, widget_key_suffix: str):
 # --------------------------------------------------------------------------- #
 # Sidebar: input files + geometry + calibration
 # --------------------------------------------------------------------------- #
+@st.cache_resource
+def _upload_scratch_dir() -> str:
+    """One scratch directory reused for the whole server process."""
+    return tempfile.mkdtemp(prefix="giwaxs_uploads_")
+
+
 def save_upload_to_temp(uploaded_file) -> str:
-    suffix = os.path.splitext(uploaded_file.name)[1] or ".tif"
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-    tmp.write(uploaded_file.getvalue())
-    tmp.close()
-    return tmp.name
+    """Materialise an uploaded file on disk (pyFAI/fabio need a real path)
+    at a DETERMINISTIC location derived from its name and size, rewriting
+    the content each call.
+
+    Previously this used NamedTemporaryFile(delete=False), which minted a
+    brand-new file on every call and never removed any of them. Since it
+    runs once per uploaded file per "Process" click -- plus once each for
+    the .poni and mask -- a working session leaked roughly a gigabyte of
+    temp files (~240 copies for a 14-file batch processed ~15 times).
+    Reusing a stable path per (name, size) means re-processing the same
+    batch overwrites its own copies instead of accumulating them, so disk
+    use is bounded by the size of the files actually uploaded.
+
+    Size is part of the name so two genuinely different uploads that
+    happen to share a filename don't collide; content is rewritten every
+    call regardless, so a re-upload under the same name is never stale.
+    """
+    stem, suffix = os.path.splitext(os.path.basename(uploaded_file.name))
+    payload = uploaded_file.getvalue()
+    safe_stem = re.sub(r"[^A-Za-z0-9._-]", "_", stem) or "upload"
+    path = os.path.join(_upload_scratch_dir(),
+                        f"{safe_stem}_{len(payload)}{suffix or '.tif'}")
+    with open(path, "wb") as fh:
+        fh.write(payload)
+    return path
+
+
+def stash_zip_to_disk(zip_bytes: bytes, tag: str) -> str:
+    """Write a freshly-built ZIP to the scratch directory and return its
+    path, so session_state holds a short string instead of the archive.
+
+    A full-batch ZIP is ~140 MB for a 14-file run at 400 dpi, and both
+    tabs can hold one simultaneously; keeping those in session_state for
+    the rest of the session was a large slice of the memory that got the
+    container killed. Streamlit's download_button accepts a file object,
+    so the archive can be streamed off disk instead. The path is stable
+    per tab, so re-preparing overwrites rather than accumulates.
+    """
+    path = os.path.join(_upload_scratch_dir(), f"giwaxs_{tag}_results.zip")
+    with open(path, "wb") as fh:
+        fh.write(zip_bytes)
+    return path
+
+
+def offer_zip_download(state_key: str, label: str, file_name: str, widget_key: str):
+    """Render the download button for a previously-prepared ZIP, reading it
+    from disk. Silently does nothing if it was never built, or if the file
+    has gone (e.g. the container was recycled) -- in that case the Prepare
+    button above is still there to rebuild it."""
+    path = st.session_state.get(state_key)
+    if not path or not os.path.exists(path):
+        return
+    with open(path, "rb") as fh:
+        st.download_button(label, fh, file_name=file_name,
+                            mime="application/zip", key=widget_key)
 
 
 def build_2d_results_zip(qip_range, qoop_range) -> bytes:
@@ -1225,20 +1282,16 @@ with tab_2d:
                 progress_bar.progress((i + 1) / n_files)
             status_text.text(f"Done -- processed {n_files} file(s).")
             st.session_state["processed_2d"] = results
-            st.session_state["_2d_zip_bytes"] = None  # invalidate any stale cached zip
+            st.session_state["_2d_zip_path"] = None  # invalidate any stale cached zip
             st.session_state["_2d_plot_png_cache"] = {}  # invalidate any stale cached images
 
     if st.session_state["processed_2d"]:
         if st.button("Prepare ZIP of ALL 2D images + line cuts for download", key="prep_2d_zip"):
             with st.spinner("Building ZIP..."):
-                st.session_state["_2d_zip_bytes"] = build_2d_results_zip(qip_range, qoop_range)
-        if st.session_state.get("_2d_zip_bytes"):
-            st.download_button(
-                "⬇️ Download ALL 2D images + line cuts (ZIP)",
-                st.session_state["_2d_zip_bytes"],
-                file_name="giwaxs_2d_results.zip", mime="application/zip",
-                key="dl_all_2d_zip",
-            )
+                st.session_state["_2d_zip_path"] = stash_zip_to_disk(
+                    build_2d_results_zip(qip_range, qoop_range), "2d")
+        offer_zip_download("_2d_zip_path", "⬇️ Download ALL 2D images + line cuts (ZIP)",
+                            "giwaxs_2d_results.zip", "dl_all_2d_zip")
         d2_plot_cache = st.session_state.setdefault("_2d_plot_png_cache", {})
         for res in st.session_state["processed_2d"]:
             st.markdown(f"#### {res['name']}")
@@ -1499,7 +1552,7 @@ with tab_pf:
                     progress_bar.progress((i + 1) / n_files)
                 status_text.text(f"Done -- processed {n_files} file(s).")
                 st.session_state["processed_pf"] = results
-                st.session_state["_pf_zip_bytes"] = None  # invalidate any stale cached zip
+                st.session_state["_pf_zip_path"] = None  # invalidate any stale cached zip
                 st.session_state["_pf_plot_png_cache"] = {}  # invalidate any stale cached images
 
     if st.session_state["processed_pf"]:
@@ -1510,14 +1563,10 @@ with tab_pf:
         # widget change) is expensive enough to feel like the app hung.
         if st.button("Prepare ZIP of ALL pole figures for download", key="prep_pf_zip"):
             with st.spinner("Building ZIP..."):
-                st.session_state["_pf_zip_bytes"] = build_pf_results_zip(dq, chi_plot_range)
-        if st.session_state.get("_pf_zip_bytes"):
-            st.download_button(
-                "⬇️ Download ALL pole figures (ZIP)",
-                st.session_state["_pf_zip_bytes"],
-                file_name="giwaxs_pole_figure_results.zip", mime="application/zip",
-                key="dl_all_pf_zip",
-            )
+                st.session_state["_pf_zip_path"] = stash_zip_to_disk(
+                    build_pf_results_zip(dq, chi_plot_range), "pole_figure")
+        offer_zip_download("_pf_zip_path", "⬇️ Download ALL pole figures (ZIP)",
+                            "giwaxs_pole_figure_results.zip", "dl_all_pf_zip")
         pf_plot_cache = st.session_state.setdefault("_pf_plot_png_cache", {})
         for res in st.session_state["processed_pf"]:
             st.markdown(f"#### {res['name']}")
