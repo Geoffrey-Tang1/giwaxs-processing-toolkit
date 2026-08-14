@@ -1158,7 +1158,19 @@ def build_grazing_units(get_unit_fiber, incident_angle_deg: float):
     unit_gi_qtot = get_unit_fiber("qtot_A^-1")
     incident_angle_rad = np.deg2rad(incident_angle_deg)
     for u in (unit_gi_ip, unit_gi_oop, unit_gi_chi, unit_gi_qtot):
-        u.set_incident_angle(incident_angle_rad)
+        # pyFAI deprecated set_incident_angle() in 2025.10 in favour of the
+        # plain property. The deprecated call still WORKS, but pyFAI's
+        # deprecation decorator prints the notice plus a full stack trace to
+        # stderr on EVERY call -- four units per file, so a normal working
+        # session buries the log under thousands of lines and makes a real
+        # traceback impossible to find. The property assignment is silent and
+        # produces an identical result (verified on pyFAI 2026.5.0).
+        # getattr/setattr on the class keeps the old setter as a fallback for
+        # pyFAI < 2025.10, where the property doesn't exist yet.
+        if isinstance(getattr(type(u), "incident_angle", None), property):
+            u.incident_angle = incident_angle_rad
+        else:
+            u.set_incident_angle(incident_angle_rad)
     return unit_gi_ip, unit_gi_oop, unit_gi_chi, unit_gi_qtot
 
 
@@ -1212,6 +1224,44 @@ COLORMAP_CATEGORIES = {
 COMMON_FONTS = list(dict.fromkeys(
     font for fonts in FONT_CATEGORIES.values() for font in fonts
 ))
+
+
+#: Total byte budget for one rendered-PNG cache in the Streamlit app.
+#: Sized so a full set of previews for a large batch stays cached (the
+#: whole point of the cache -- unrelated reruns must not re-invoke
+#: matplotlib), while a long session of style tweaking can't grow without
+#: bound. See cache_png_bytes for why that mattered.
+PLOT_CACHE_MAX_BYTES = 192 * 1024 * 1024
+
+
+def cache_png_bytes(cache: Dict[object, bytes], key, png: bytes,
+                     max_bytes: int = PLOT_CACHE_MAX_BYTES) -> bytes:
+    """Insert a rendered PNG into `cache` and evict oldest-first until the
+    cache's total size is within `max_bytes`. Returns the PNG.
+
+    The cache key includes every style parameter that affects the output,
+    so changing a colormap or a font does not overwrite the old entry --
+    it ADDS one. Without eviction that is unbounded growth: a 14-file
+    batch is ~140 MB of previews per style setting at the default 400 dpi,
+    so a handful of tweaks in one session was enough to exhaust the
+    memory of a Streamlit Community Cloud container and kill the process
+    (which the user sees as the "Oh no." page, with no Python traceback
+    anywhere in the logs, since the process is killed rather than raising).
+
+    Eviction is plain insertion-order (dicts preserve it), which
+    approximates LRU well here: the entries for the style you're currently
+    looking at were inserted most recently, so the ones dropped are from
+    settings you've moved on from. Evicting an entry only costs a
+    re-render if you go back to that exact combination.
+    """
+    cache[key] = png
+    if max_bytes is None or max_bytes <= 0:
+        return png
+    total = sum(len(v) for v in cache.values())
+    while total > max_bytes and len(cache) > 1:
+        oldest_key = next(iter(cache))
+        total -= len(cache.pop(oldest_key))
+    return png
 
 
 def resolve_vmin_vmax(intensity: np.ndarray, vmin_percentile: float,
