@@ -35,6 +35,17 @@ Usage
 
 (If --input / --output-dir are omitted, you'll be prompted for them.)
 
+Optionally, peaks can be fitted on the resulting line cuts in the same run
+by adding one --fit-region per peak (see --help for the full description):
+
+    python giwaxs_2d1d_agent.py ... \\
+        --fit-region "0.20:0.32:(100) lamellar" \\
+        --fit-region "1.55:1.80:pi-pi stacking"
+
+which additionally writes a `peakfits/` directory of overlay plots and one
+combined `peak_fit_results.csv` (q0, d-spacing, FWHM, coherence length via
+the q-space Scherrer equation, peak intensity/area, R^2).
+
 Run `python giwaxs_2d1d_agent.py --help` for the full parameter list.
 """
 
@@ -137,6 +148,29 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                          "line-cut plots' q-axis. Off (no minor ticks) unless "
                          "given -- an opt-in extra, not shown by default.")
 
+    # --- Peak fitting (optional; off unless at least one --fit-region given) ---
+    p.add_argument("--fit-region", type=gc.parse_fit_region, action="append", default=None,
+                    dest="fit_regions", metavar="QMIN:QMAX[:LABEL]",
+                    help="Fit a diffraction peak within this q window (inverse "
+                         "Angstrom) on every line cut produced by this run. "
+                         "Colon-separated so labels may contain commas, e.g. "
+                         "--fit-region 1.6:1.8:pi-pi stacking. Repeat the flag "
+                         "for multiple peaks. Outputs an overlay PNG per "
+                         "(file, sector) into a 'peakfits' subdirectory plus one "
+                         "combined peak_fit_results.csv. NOTE: every region is "
+                         "fitted against every sector -- a region that only has "
+                         "real signal in one sector will still return a "
+                         "numerically valid but physically meaningless fit "
+                         "elsewhere, so check R^2 and q0 against expectations.")
+    p.add_argument("--fit-shape", choices=["gaussian", "lorentzian", "pseudo_voigt"],
+                    default="gaussian",
+                    help="Peak profile fitted to each --fit-region (on top of a "
+                         "linear background).")
+    p.add_argument("--fit-scherrer-k", type=float, default=0.9,
+                    help="Scherrer shape factor K used for the coherence length "
+                         "L_c = 2*pi*K/FWHM, with FWHM taken directly in q-space "
+                         "(the standard GIWAXS convention, not the 2-theta form).")
+
     p.add_argument("--extra-ranges", type=gc.parse_range, action="append", default=None,
                     help="Optional additional angular sector to integrate "
                          "non-interactively, as 'angle1,angle2' in degrees "
@@ -180,8 +214,48 @@ def ask_for_extra_ranges() -> List[Tuple[float, float]]:
 # --------------------------------------------------------------------------- #
 # Core per-file processing
 # --------------------------------------------------------------------------- #
+def fit_peaks_for_linecut(q, intensity, args, base: str, tag: str, sector_label: str,
+                           out_dirs, fit_rows):
+    """Fit every --fit-region against one line cut, save an overlay PNG, and
+    append one CSV row per region to `fit_rows` (in place).
+
+    Each region is fitted independently and failures are caught per region,
+    so one non-convergent window doesn't lose the other regions' results --
+    a failed region is recorded as an error row rather than dropped, so it
+    stays visible in the combined CSV.
+    """
+    fits = []
+    for q_min, q_max, label in args.fit_regions:
+        try:
+            fit = gc.fit_peak(q, intensity, q_min, q_max, shape=args.fit_shape,
+                               scherrer_k=args.fit_scherrer_k, label=label)
+        except Exception as exc:
+            print(f"    Peak fit FAILED [{label}] {q_min}-{q_max} 1/A: {exc}")
+            fit_rows.append(gc.peak_fit_csv_error_row(
+                base, sector_label, label, q_min, q_max, args.fit_shape, str(exc)))
+            continue
+        fits.append(fit)
+        fit_rows.append(gc.peak_fit_csv_row(fit, base, sector_label))
+        print(f"    Peak [{label}]: q0={fit['q0']:.4f} 1/A, "
+              f"d={fit['d_spacing']:.2f} A, FWHM={fit['fwhm']:.4f} 1/A, "
+              f"L_c={fit['coherence_length']:.1f} A, R^2={fit['r_squared']:.4f}")
+
+    if not fits:
+        return
+    overlay_path = os.path.join(out_dirs["peakfits"], f"{base}_peakfit_{tag}.png")
+    gc.plot_linecut_with_fits(
+        q, intensity, fits, overlay_path,
+        title=f"{base}: {sector_label} peak fits",
+        line_color=args.line_color, font_family=args.font_family,
+        font_size=args.font_size, dpi=args.dpi,
+        q_range=args.linecut_q_range, tick_spacing=args.linecut_tick_spacing,
+        subtick_spacing=args.linecut_subtick_spacing,
+    )
+    print(f"    Saved peak-fit overlay: {overlay_path}")
+
+
 def process_file(tiff_path: str, fi, get_unit_fiber, mask, args, out_dirs, fabio, all_ranges,
-                  angle_map=None):
+                  angle_map=None, fit_rows=None):
     base = os.path.splitext(os.path.basename(tiff_path))[0]
     print(f"\nProcessing: {tiff_path}")
 
@@ -250,7 +324,7 @@ def process_file(tiff_path: str, fi, get_unit_fiber, mask, args, out_dirs, fabio
         with gc.style_context(args.font_family, args.font_size):
             fig, ax = plt.subplots(1, 2, width_ratios=[1, 0.05], figsize=gc.DEFAULT_FIGSIZE)
             v_lo, v_hi = gc.resolve_vmin_vmax(res_I, args.vmin_percentile, args.vmin, args.vmax,
-                                               args.vmax_percentile)
+                                               args.vmax_percentile, color_scale=args.color_scale)
             sector_norm = (LogNorm(vmin=v_lo, vmax=v_hi) if args.color_scale == "log"
                             else Normalize(vmin=v_lo, vmax=v_hi))
             mesh = ax[0].pcolormesh(res_qx, res_qy, res_I, norm=sector_norm,
@@ -269,7 +343,7 @@ def process_file(tiff_path: str, fi, get_unit_fiber, mask, args, out_dirs, fabio
             ax[0].set_xlabel(xlabel)
             ax[0].set_ylabel(ylabel)
             gc.add_angle_lines(ax[0], res_qx, res_qy, angles, color=args.sector_line_color)
-            cbar = plt.colorbar(mesh, cax=ax[1], orientation="vertical")
+            cbar = fig.colorbar(mesh, cax=ax[1], orientation="vertical")
             cbar.ax.tick_params(which="both", direction="in")
             fig.suptitle(f"{base}: sector {angles} deg")
             fig.tight_layout()
@@ -277,6 +351,17 @@ def process_file(tiff_path: str, fi, get_unit_fiber, mask, args, out_dirs, fabio
             plt.close(fig)
 
         print(f"  Saved line cut ({angles[0]}, {angles[1]}) deg -> {data_out_path}")
+
+        # --- Optional peak fitting on this line cut ------------------------
+        # Done here, on the in-memory (q, intensity) arrays, rather than as a
+        # separate pass that re-reads the saved .txt files -- same numbers,
+        # no re-processing of the raw TIFF.
+        if args.fit_regions:
+            fit_peaks_for_linecut(
+                q, intensity, args, base, tag,
+                sector_label=f"({angles[0]}, {angles[1]}) deg",
+                out_dirs=out_dirs, fit_rows=fit_rows if fit_rows is not None else [],
+            )
 
 
 # --------------------------------------------------------------------------- #
@@ -311,6 +396,10 @@ def _main_impl(argv: Optional[List[str]] = None):
         "images": os.path.join(output_dir, "images"),
         "linecuts": os.path.join(output_dir, "linecuts"),
     }
+    # Only created when peak fitting was actually requested, so a plain run
+    # doesn't leave an empty directory behind.
+    if args.fit_regions:
+        out_dirs["peakfits"] = os.path.join(output_dir, "peakfits")
     for d in out_dirs.values():
         os.makedirs(d, exist_ok=True)
 
@@ -332,12 +421,20 @@ def _main_impl(argv: Optional[List[str]] = None):
     if not args.non_interactive:
         all_ranges += ask_for_extra_ranges()
 
+    fit_rows: List[dict] = []
     for tiff_path in tiff_files:
         process_file(
             tiff_path, fi, get_unit_fiber,
             mask, args, out_dirs, fabio, all_ranges,
-            angle_map=angle_map,
+            angle_map=angle_map, fit_rows=fit_rows,
         )
+
+    if args.fit_regions:
+        csv_path = os.path.join(output_dir, "peak_fit_results.csv")
+        gc.write_peak_fit_csv(csv_path, fit_rows)
+        n_ok = sum(1 for r in fit_rows if not r.get("error"))
+        print(f"\nPeak fitting: {n_ok}/{len(fit_rows)} region fits succeeded "
+              f"-> {csv_path}")
 
     print(f"\nDone. Outputs written to: {os.path.abspath(output_dir)}")
 
