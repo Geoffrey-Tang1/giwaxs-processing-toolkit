@@ -1205,7 +1205,16 @@ with tab_2d:
 
                     results.append({
                         "name": os.path.splitext(uf.name)[0],
-                        "res_I": res_I, "res_qx": res_qx, "res_qy": res_qy,
+                        # float32, not pyFAI's float64: this array is kept in
+                        # session_state for the whole session and is only ever
+                        # used for the 2D image (pcolormesh + intensity
+                        # percentiles), where 7 significant digits is far more
+                        # than a detector's dynamic range needs. Halves the
+                        # per-file resident cost (~7.7 -> ~3.9 MB at npt=1000).
+                        # The line cuts below stay float64 -- those feed peak
+                        # fitting, where the extra precision is free to keep.
+                        "res_I": res_I.astype(np.float32, copy=False),
+                        "res_qx": res_qx, "res_qy": res_qy,
                         "linecuts": linecuts,
                     })
                 except Exception as exc:
@@ -1272,7 +1281,7 @@ with tab_2d:
                 buf = io.BytesIO()
                 fig2d.savefig(buf, format="png", dpi=st.session_state["2d_dpi"])
                 plt.close(fig2d)
-                d2_plot_cache[img_cache_key] = buf.getvalue()
+                gc.cache_png_bytes(d2_plot_cache, img_cache_key, buf.getvalue())
             png_bytes_2d = d2_plot_cache[img_cache_key]
 
             c1, c2 = st.columns([2, 1])
@@ -1308,7 +1317,7 @@ with tab_2d:
                     buf2 = io.BytesIO()
                     fig1d.savefig(buf2, format="png", dpi=st.session_state["2d_dpi"])
                     plt.close(fig1d)
-                    d2_plot_cache[lc_cache_key] = buf2.getvalue()
+                    gc.cache_png_bytes(d2_plot_cache, lc_cache_key, buf2.getvalue())
                 png_bytes_lc = d2_plot_cache[lc_cache_key]
 
                 lc1, lc2 = st.columns([2, 1])
@@ -1544,7 +1553,7 @@ with tab_pf:
                     buf = io.BytesIO()
                     fig.savefig(buf, format="png", dpi=st.session_state["pf_dpi"])
                     plt.close(fig)
-                    pf_plot_cache[cache_key] = buf.getvalue()
+                    gc.cache_png_bytes(pf_plot_cache, cache_key, buf.getvalue())
                 png_bytes = pf_plot_cache[cache_key]
 
                 pc1, pc2 = st.columns([2, 1])
@@ -1713,7 +1722,7 @@ with tab_peakfit:
                 buf = io.BytesIO()
                 fig.savefig(buf, format="png", dpi=st.session_state["2d_dpi"])
                 plt.close(fig)
-                plot_cache[cache_key] = buf.getvalue()
+                gc.cache_png_bytes(plot_cache, cache_key, buf.getvalue())
             png_bytes = plot_cache[cache_key]
 
             pf1, pf2 = st.columns([2, 1])
