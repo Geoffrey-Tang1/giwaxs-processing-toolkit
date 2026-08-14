@@ -116,6 +116,35 @@ def parse_shape(text: str) -> Tuple[int, int]:
         )
 
 
+def parse_fit_region(text: str) -> Tuple[float, float, str]:
+    """Parse a peak-fitting window given as 'QMIN:QMAX' or 'QMIN:QMAX:LABEL'.
+
+    Colon-separated (not comma-separated like parse_range) so that a label
+    containing a comma -- e.g. '0.2:0.3:(100), lamellar' -- still parses.
+    The label is optional and defaults to the numeric range, so a bare
+    '1.6:1.8' is valid. q values are in inverse Angstrom.
+    """
+    parts = text.split(":", 2)
+    if len(parts) < 2:
+        raise argparse.ArgumentTypeError(
+            "Expected 'QMIN:QMAX' or 'QMIN:QMAX:LABEL' in inverse Angstrom, "
+            "e.g. '1.6:1.8:pi-pi stacking'"
+        )
+    try:
+        q_min, q_max = float(parts[0]), float(parts[1])
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"Could not read '{parts[0]}' and '{parts[1]}' as numbers -- "
+            "expected 'QMIN:QMAX[:LABEL]', e.g. '1.6:1.8:pi-pi stacking'"
+        )
+    if q_max <= q_min:
+        raise argparse.ArgumentTypeError(
+            f"Fit region QMAX ({q_max}) must be greater than QMIN ({q_min})."
+        )
+    label = parts[2].strip() if len(parts) == 3 and parts[2].strip() else f"{q_min:g}-{q_max:g}"
+    return q_min, q_max, label
+
+
 # --------------------------------------------------------------------------- #
 # Shared CLI arguments (geometry / calibration)
 # --------------------------------------------------------------------------- #
@@ -1187,24 +1216,90 @@ COMMON_FONTS = list(dict.fromkeys(
 
 def resolve_vmin_vmax(intensity: np.ndarray, vmin_percentile: float,
                        vmin: Optional[float] = None, vmax: Optional[float] = None,
-                       vmax_percentile: float = 99.9):
-    """Resolve the LogNorm vmin/vmax: explicit values win if given,
+                       vmax_percentile: float = 99.9, color_scale: str = "log"):
+    """Resolve the colour-scale vmin/vmax: explicit values win if given,
     otherwise fall back to a percentile-of-nonzero-pixels heuristic for
     BOTH ends (not just the min) -- using the raw max as vmax tends to
     wash out contrast when a few hot/saturated pixels are present.
+
+    This function is TOTAL: whatever it is handed, it returns a pair that
+    LogNorm/Normalize will accept (finite, and vmin strictly less than
+    vmax; both strictly positive when color_scale="log"). That matters
+    because these values can come straight from a user-typed box or from
+    an AI style suggestion, and matplotlib's failure mode for a bad pair
+    is an unhandled `ValueError: Invalid vmin or vmax` raised deep inside
+    colorbar drawing -- which in the Streamlit app killed the whole script
+    run rather than surfacing as a message next to the offending widget.
+    Non-positive values under a log scale are the common case: log10(0)
+    is -inf, so a vmax of 0 (an empty number box) is enough to trigger it.
+
+    Callers that want to TELL the user their input was unusable should
+    check it themselves first (see validate_manual_color_scale) -- this
+    function silently falls back rather than raising, so that rendering
+    always succeeds.
     """
-    if vmin is not None and vmax is not None:
-        return max(vmin, 1e-12), vmax
-    nonzero = intensity[np.isfinite(intensity) & (intensity > 0)]
-    if nonzero.size == 0:
-        auto_vmin, auto_vmax = 1e-6, 1.0
+    is_log = color_scale == "log"
+    floor = 1e-12  # smallest value with a finite log10, used as the log-scale ceiling-stop
+
+    def _clean(v):
+        """Drop a value that can't be used as given (None, NaN/inf, or
+        non-positive under a log scale) so it falls back to automatic."""
+        if v is None:
+            return None
+        v = float(v)
+        if not np.isfinite(v):
+            return None
+        if is_log and v <= 0:
+            return None
+        return v
+
+    vmin, vmax = _clean(vmin), _clean(vmax)
+
+    finite = intensity[np.isfinite(intensity)]
+    usable = finite[finite > 0] if is_log else finite
+    if usable.size == 0:
+        auto_vmin, auto_vmax = (floor, 1.0) if is_log else (0.0, 1.0)
     else:
-        auto_vmin = max(np.percentile(nonzero, vmin_percentile), 1e-12)
-        auto_vmax = np.percentile(nonzero, vmax_percentile)
+        auto_vmin = float(np.percentile(usable, vmin_percentile))
+        auto_vmax = float(np.percentile(usable, vmax_percentile))
+        if is_log:
+            auto_vmin = max(auto_vmin, floor)
         if auto_vmax <= auto_vmin:
-            auto_vmax = auto_vmin * 10
-    return (vmin if vmin is not None else auto_vmin,
-            vmax if vmax is not None else auto_vmax)
+            auto_vmax = auto_vmin * 10 if is_log else auto_vmin + 1.0
+
+    v_lo = vmin if vmin is not None else auto_vmin
+    v_hi = vmax if vmax is not None else auto_vmax
+
+    # Final ordering guard: a reversed or degenerate pair (vmin >= vmax) is
+    # meaningless for a colour scale and matplotlib rejects it, so widen the
+    # top end rather than fail. Kept last so it also covers the case where
+    # one end was explicit and the other came from the percentile heuristic.
+    if v_hi <= v_lo:
+        v_hi = v_lo * 10 if is_log else v_lo + 1.0
+
+    return v_lo, v_hi
+
+
+def validate_manual_color_scale(vmin, vmax, color_scale: str = "log") -> Optional[str]:
+    """Check a user-entered explicit colour-scale pair and return a short
+    human-readable reason if it can't be used as given, or None if it's
+    fine. Purely advisory -- resolve_vmin_vmax will fall back safely
+    either way; this exists so a UI can say WHY the picture doesn't match
+    what was typed, instead of silently substituting different numbers.
+    """
+    for name, v in (("minimum", vmin), ("maximum", vmax)):
+        if v is None:
+            continue
+        if not np.isfinite(float(v)):
+            return f"The colour-scale {name} is not a finite number."
+        if color_scale == "log" and float(v) <= 0:
+            return (f"The colour-scale {name} ({float(v):g}) must be greater than zero "
+                    f"on a log colour scale, since log(0) is undefined. Either enter a "
+                    f"positive value or switch the colour scale to linear.")
+    if vmin is not None and vmax is not None and float(vmax) <= float(vmin):
+        return (f"The colour-scale maximum ({float(vmax):g}) must be greater than the "
+                f"minimum ({float(vmin):g}).")
+    return None
 
 
 #: Axis label conventions for the 2D image -- both refer to the identical
@@ -1300,7 +1395,8 @@ def plot_2d_image(qx, qy, intensity, out_path=None, qlim_x=None, qlim_y=None,
     with style_context(font_family, font_size):
         fig, ax = plt.subplots(1, 2, width_ratios=[1, 0.05], figsize=figsize)
 
-        v_lo, v_hi = resolve_vmin_vmax(intensity, vmin_percentile, vmin, vmax, vmax_percentile)
+        v_lo, v_hi = resolve_vmin_vmax(intensity, vmin_percentile, vmin, vmax, vmax_percentile,
+                                        color_scale=color_scale)
         norm = LogNorm(vmin=v_lo, vmax=v_hi) if color_scale == "log" else Normalize(vmin=v_lo, vmax=v_hi)
         mesh = ax[0].pcolormesh(qx, qy, intensity, norm=norm, cmap=cmap)
         ax[0].set_facecolor("black")
@@ -1323,7 +1419,14 @@ def plot_2d_image(qx, qy, intensity, out_path=None, qlim_x=None, qlim_y=None,
             ax[0].xaxis.set_minor_locator(NullLocator())
             ax[0].yaxis.set_minor_locator(NullLocator())
         ax[0].tick_params(axis="both", which="both", direction="in")
-        cbar = plt.colorbar(mesh, cax=ax[1], orientation="vertical")
+        # fig.colorbar, NOT plt.colorbar: the pyplot version routes through
+        # gcf(), which is global state shared across Streamlit's script-run
+        # threads, so under the app it can attach the colorbar to a DIFFERENT
+        # figure than the one being built here (matplotlib says so out loud:
+        # "Adding colorbar to a different Figure ... than ... fig.colorbar is
+        # called on"). Going through the figure object keeps it bound to the
+        # right one regardless of what else is being drawn concurrently.
+        cbar = fig.colorbar(mesh, cax=ax[1], orientation="vertical")
         cbar.ax.tick_params(which="both", direction="in")
         fig.tight_layout()
         add_edge_labels(fig, top=edge_label_top, bottom=edge_label_bottom,
@@ -1488,7 +1591,7 @@ def plot_pole_figure(chi_axis, profile, out_path, target_q, dq, title=None,
             title_text += f"\nHerman's orientation factor S = {herman_s:.3f}"
         ax.set_title(title_text, fontsize=(font_size * 0.8) if font_size else 9)
 
-        cb = plt.colorbar(mesh, ax=ax, pad=0.12)
+        cb = fig.colorbar(mesh, ax=ax, pad=0.12)  # fig.colorbar, not plt.* -- see plot_2d_image
         cb.set_label("Intensity (a.u.)")
         fig.tight_layout()
         fig.savefig(out_path, dpi=200)
@@ -1707,6 +1810,21 @@ def fit_peak(q, intensity, q_min: float, q_max: float,
     order = np.argsort(q_fit)  # defensive -- should already be sorted
     q_fit, I_fit = q_fit[order], I_fit[order]
 
+    # A perfectly flat window (every intensity identical -- in practice all
+    # zeros) carries no peak information, but curve_fit still "converges" on
+    # it and returns a meaningless result with R^2 = nan, because the total
+    # sum of squares is zero. Reject it explicitly instead, so the caller
+    # gets a clear reason rather than a silent nan. The usual cause is a
+    # fit window that falls outside this particular sector's detector
+    # coverage (e.g. a high-q window against a narrow out-of-plane sector).
+    if float(np.ptp(I_fit)) == 0.0:
+        raise GiwaxsError(
+            f"No intensity variation in range [{q_min:.4g}, {q_max:.4g}] 1/A"
+            f"{f' ({label})' if label else ''} -- every point has the same value "
+            f"({I_fit[0]:.4g}). This q window most likely falls outside this "
+            f"line cut's actual detector coverage, so there is no peak to fit."
+        )
+
     q_span = q_max - q_min
     q_center = float(q_fit.mean())  # background defined relative to this for numerical stability
     edge_n = max(1, len(q_fit) // 8)
@@ -1807,6 +1925,53 @@ def fit_multiple_peaks(q, intensity, regions, shape: str = "gaussian",
         fit_peak(q, intensity, q_min, q_max, shape=shape, scherrer_k=scherrer_k, label=label)
         for (q_min, q_max, label) in regions
     ]
+
+
+PEAK_FIT_CSV_FIELDS = [
+    "filename", "sector", "label", "q_min", "q_max", "shape",
+    "q0_invA", "d_spacing_A", "fwhm_invA", "coherence_length_A", "scherrer_k",
+    "peak_intensity", "peak_area", "eta", "r_squared", "error",
+]
+
+
+def peak_fit_csv_row(fit: Dict[str, object], filename: str, sector: str) -> Dict[str, object]:
+    """Flatten one fit_peak() result dict into a CSV-writable row matching
+    PEAK_FIT_CSV_FIELDS. The bulky overlay-plot arrays (fit_curve_q etc.)
+    are dropped; only scalar results are kept."""
+    q_min, q_max = fit["q_range"]
+    return {
+        "filename": filename, "sector": sector, "label": fit.get("label", ""),
+        "q_min": q_min, "q_max": q_max, "shape": fit.get("shape", ""),
+        "q0_invA": fit["q0"], "d_spacing_A": fit["d_spacing"],
+        "fwhm_invA": fit["fwhm"], "coherence_length_A": fit["coherence_length"],
+        "scherrer_k": fit.get("scherrer_k", ""),
+        "peak_intensity": fit["peak_intensity"], "peak_area": fit["peak_area"],
+        "eta": fit.get("eta"), "r_squared": fit["r_squared"], "error": "",
+    }
+
+
+def peak_fit_csv_error_row(filename: str, sector: str, label: str,
+                            q_min: float, q_max: float, shape: str,
+                            message: str) -> Dict[str, object]:
+    """A row recording that one (file, sector, region) fit FAILED, so a
+    failed region is visible in the CSV rather than silently absent."""
+    row = {k: "" for k in PEAK_FIT_CSV_FIELDS}
+    row.update({"filename": filename, "sector": sector, "label": label,
+                "q_min": q_min, "q_max": q_max, "shape": shape, "error": message})
+    return row
+
+
+def write_peak_fit_csv(csv_path: str, rows: List[Dict[str, object]]):
+    """Write all peak-fit result rows to one combined CSV (overwriting any
+    previous run's file, unlike the Herman summary's append-mode helper --
+    a fit run is reproducible from its inputs, so appending would just
+    accumulate stale duplicates across re-runs)."""
+    import csv
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=PEAK_FIT_CSV_FIELDS)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
 
 
 def plot_linecut_with_fits(q, intensity, fits: List[Dict[str, object]], out_path=None,
