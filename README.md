@@ -117,6 +117,44 @@ Run `--help` on any script for the full parameter list.
 
 ---
 
+## Peak fitting (CLI)
+
+The 2D/1D agent can fit diffraction peaks on the line cuts it produces, in
+the same run — no second pass over the raw TIFFs. Add one `--fit-region`
+per peak:
+
+```bash
+python giwaxs_2d1d_agent.py --input /path/to/scan_series/ \
+    --beam-center-y 145 --beam-center-x 1088 --distance 0.65 \
+    --wavelength 1.5406e-10 --pixel-size 172e-6 --detector-shape 1043,981 \
+    --incident-angle 0.1 --non-interactive \
+    --fit-region "0.20:0.32:(100) lamellar" \
+    --fit-region "1.55:1.80:pi-pi stacking" \
+    --fit-shape pseudo_voigt --fit-scherrer-k 0.9
+```
+
+Regions are `QMIN:QMAX[:LABEL]` in inverse Angstrom — **colon**-separated
+(not comma-separated like the other range flags) so a label may itself
+contain commas. The label is optional.
+
+Outputs, alongside the usual `images/` and `linecuts/`:
+
+- `peakfits/<file>_peakfit_<sector>.png` — the line cut with every fitted peak overlaid, fit window shaded and centre marked, so fit quality is visible at a glance.
+- `peak_fit_results.csv` — one combined table, one row per (file, sector, region): `q0`, d-spacing (2π/q₀), FWHM, coherence length, peak intensity, peak area, η (pseudo-Voigt only), and R².
+
+Coherence length uses the Scherrer equation **in q-space**, `L_c = 2πK/FWHM`
+with FWHM measured directly in 1/Å and `K = 0.9` by default — the standard
+GIWAXS convention, not the classical 2θ-based form.
+
+Two things worth knowing:
+
+- **Every region is fitted against every sector.** That's deliberate (it matches the app), but a peak that only has real signal in one sector will still return a numerically valid — and physically meaningless — fit in the others. Check R² and whether q₀ lands where you expect; the software can't infer which peak belongs to which sector.
+- **A region that fails to fit doesn't abort the run.** The other regions still fit, the overlay is still saved, and the failure is written into the CSV's `error` column so it stays visible rather than silently missing. A window that falls outside a sector's actual detector coverage is rejected with an explicit message instead of returning a meaningless fit.
+
+The same fitting is available interactively in the Streamlit app (Tab 2).
+
+---
+
 ## Batch processing
 
 Point `--input` (or a config's `"input"` field) at a **folder** instead of
