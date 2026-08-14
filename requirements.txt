@@ -6,3 +6,5 @@ scipy
 streamlit
 pandas
 anthropic
+openai
+google-genai
