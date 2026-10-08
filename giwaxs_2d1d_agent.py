@@ -489,6 +489,10 @@ def process_file(tiff_path: str, fi, get_unit_fiber, mask, args, out_dirs, fabio
             plt.close(fig)
 
         print(f"  Saved box cut q_xy {qxy_lo:g}-{qxy_hi:g} -> {data_out_path}")
+        _qstop, _why, _msg = gc.box_cut_report(
+            res_I, res_qx, res_qy, along="qz", across_range=(qxy_lo, qxy_hi))
+        if _why in ("missing_wedge", "empty"):
+            print(f"    NOTE: {_msg}")
 
         if args.fit_regions:
             fit_peaks_for_linecut(

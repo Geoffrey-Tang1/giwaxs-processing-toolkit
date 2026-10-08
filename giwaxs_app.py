@@ -1708,6 +1708,12 @@ with tab_2d:
                             linecuts.append((
                                 (box_qxy_lo, box_qxy_hi), bq, bI,
                                 f"box cut q_xy {box_qxy_lo:g}-{box_qxy_hi:g}"))
+                            if i == 0:
+                                _qs, _why, _m = gc.box_cut_report(
+                                    res_I, res_qx, res_qy, along="qz",
+                                    across_range=(box_qxy_lo, box_qxy_hi))
+                                if _why in ("missing_wedge", "empty"):
+                                    st.info(f"**Box cut range.** {_m}")
                         except Exception as exc:
                             if i == 0:
                                 st.warning(f"Box cut skipped: {exc}")
@@ -1830,7 +1836,7 @@ with tab_2d:
                 if lc_cache_key not in d2_plot_cache:
                     fig1d = gc.plot_1d_linecut(
                         q, intensity, out_path=None, angle_range=angles,
-                        title=f"{res['name']}: {angles} deg",
+                        title=f"{res['name']}: {lc_label}",
                         line_color=st.session_state["2d_line_color"],
                         font_family=st.session_state["2d_font_family"],
                         font_size=st.session_state["2d_font_size"],
@@ -1873,7 +1879,7 @@ with tab_2d:
                     key=f"dlcsv_{res['name']}_{tag}",
                 )
 
-                with st.expander(f"View data table -- {res['name']}: {angles} deg"):
+                with st.expander(f"View data table -- {res['name']}: {lc_label}"):
                     st.dataframe(linecut_df, width='stretch', height=250)
 
 # --------------------------------------------------------------------------- #

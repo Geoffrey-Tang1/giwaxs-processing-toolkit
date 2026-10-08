@@ -2302,6 +2302,78 @@ def find_beamstop_mask(image, beam_col, rel_threshold: float = 0.30,
     return mask
 
 
+def box_cut_report(intensity, qx, qy, along: str = "qz",
+                    across_range=(0.025, 0.05)):
+    """Say where a box cut's data stops, and why.
+
+    A strip does not simply fade out: it ends, and for one of two very
+    different reasons. Running off the detector is a boundary of the
+    measurement. Entering the missing wedge is a boundary of what a
+    single grazing-incidence shot can reach at all -- and because the
+    wedge widens with q, a strip survives only until the wedge opens
+    past the strip's own q_xy. A strip at 0.025-0.05 therefore ends
+    around q = 0.9 and carries no pi-pi peak, while one at 0.20-0.30
+    reaches 2.1 but is useless at low q.
+
+    Without this, the curve just stops and a fit over a window beyond
+    the stop reports whatever the truncated data supports.
+
+    Returns (q_stop, reason, message). q_stop is None when the strip
+    never had data at all.
+    """
+    I = np.asarray(intensity, dtype=float)
+    qx = np.asarray(qx, dtype=float)
+    qy = np.asarray(qy, dtype=float)
+    lo, hi = float(across_range[0]), float(across_range[1])
+
+    if along == "qz":
+        sel = (np.abs(qx) >= lo) & (np.abs(qx) <= hi)
+        band = I[:, sel]
+        axis_q = qy
+        rows_full = I
+        across_full = qx
+    else:
+        sel = (np.abs(qy) >= lo) & (np.abs(qy) <= hi)
+        band = I[sel, :].T
+        axis_q = qx
+        rows_full = I.T
+        across_full = qy
+
+    alive = (np.isfinite(band) & (band > 0)).any(axis=1) & (axis_q > 0)
+    if not alive.any():
+        return None, "empty", (
+            f"The strip |q| = {lo:g}-{hi:g} 1/A contains no measured bins at "
+            f"all. If it sits inside the beamstop shadow, move its inner edge "
+            f"outward."
+        )
+    last = int(np.where(alive)[0].max())
+    q_stop = float(axis_q[last])
+    if last >= alive.size - 1:
+        return q_stop, "end_of_map", (
+            f"The strip runs to the edge of the map at q = {q_stop:.2f} 1/A."
+        )
+
+    # Look just past the stop: is there data further out on the across axis?
+    probe = rows_full[last + 1]
+    outer = np.abs(across_full) > hi
+    has_outer = bool((np.isfinite(probe[outer]) & (probe[outer] > 0)).any())
+    if has_outer:
+        return q_stop, "missing_wedge", (
+            f"This strip carries data only up to q = {q_stop:.2f} 1/A. Beyond "
+            f"that it is inside the missing wedge, which widens with q until "
+            f"it swallows the strip -- there is measured data further out in "
+            f"q_xy at the same height, so this is the wedge and not the "
+            f"detector edge. A peak above {q_stop:.2f} 1/A (pi-pi, typically "
+            f"near 1.7) will not appear here: read it from the angular sector "
+            f"cut instead, which is unaffected that far out. A wider strip "
+            f"reaches higher q but drifts off any peak that sits on the axis."
+        )
+    return q_stop, "detector_edge", (
+        f"The strip carries data up to q = {q_stop:.2f} 1/A, where it runs "
+        f"off the detector."
+    )
+
+
 def box_cut(intensity, qx, qy, along: str = "qz",
              across_range=(0.03, 0.12), along_range=None,
              as_qtotal: bool = True):
