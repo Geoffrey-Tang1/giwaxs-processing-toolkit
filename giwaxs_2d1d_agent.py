@@ -78,10 +78,10 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     gc.add_geometry_args(p)
     gc.add_calibration_args(p)
 
-    p.add_argument("--qip-plot-range", type=gc.parse_range, default=(-0.5, 2.4),
+    p.add_argument("--qip-plot-range", type=gc.parse_range, default=(-0.5, 1.99),
                     help="X axis (q_ip) plot limits for the 2D image, as "
                          "'min,max' in inverse Angstrom.")
-    p.add_argument("--qoop-plot-range", type=gc.parse_range, default=(-0.25, 2.75),
+    p.add_argument("--qoop-plot-range", type=gc.parse_range, default=(-0.05, 2.49),
                     help="Y axis (q_oop) plot limits for the 2D image, as "
                          "'min,max' in inverse Angstrom.")
     p.add_argument("--vmin-percentile", type=float, default=30.0,
@@ -118,10 +118,13 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument("--sector-line-color", default="cyan",
                     help="Colour of the sector boundary lines overlaid on the "
                          "2D image for each line-cut sector.")
-    p.add_argument("--font-family", default=None,
+    p.add_argument("--font-family", default="Arial",
                     help=f"Font family for all plot text. Common choices: "
-                         f"{', '.join(gc.COMMON_FONTS)}.")
-    p.add_argument("--font-size", type=float, default=None,
+                         f"{', '.join(gc.COMMON_FONTS)}. Arial is not "
+                         f"installed on most Linux machines; it is swapped "
+                         f"for the metric-compatible Liberation Sans at "
+                         f"render time, so the result matches either way.")
+    p.add_argument("--font-size", type=float, default=16.0,
                     help="Base font size (points) for all plot text.")
     p.add_argument("--no-auto-beamstop-mask", action="store_true",
                     help="Do not detect and mask the beamstop shadow. By "
@@ -149,10 +152,27 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                          "most 0.25%%, widths unchanged, and only the few bins "
                          "sitting directly on a gap read low, by up to 8%%. "
                          "The beamstop is always masked either way.")
+    p.add_argument("--tick-color", default="white",
+                    help="Colour of the 2D image's tick MARKS. They point into "
+                         "the map, so they sit on the image rather than on the "
+                         "page and a dark mark disappears into a log-scaled "
+                         "one. White by default; change it for a light "
+                         "colormap. The labels stay outside on white and are "
+                         "not affected.")
+    p.add_argument("--axes-linewidth", type=float, default=1.6,
+                    help="Width in points of the 2D image's frame and tick "
+                         "marks. Matplotlib's default is 0.8, which survives a "
+                         "screen but thins out in print and all but vanishes "
+                         "once a panel is scaled down into a figure. Tick "
+                         "length follows the width; the frame stays black and "
+                         "only the marks take --tick-color.")
+    p.add_argument("--colorbar", dest="show_colorbar", action="store_true",
+                    help="Put the intensity colour bar on the saved image. Off "
+                         "by default: a panel in a figure usually carries its "
+                         "scale elsewhere, and the bar costs width.")
     p.add_argument("--no-colorbar", dest="show_colorbar", action="store_false",
-                    help="Leave the intensity colour bar off the saved image. "
-                         "Useful when the figure will carry its scale "
-                         "elsewhere, or for a bare panel.")
+                    help=argparse.SUPPRESS)   # kept so existing commands still run
+    p.set_defaults(show_colorbar=False)
     p.add_argument("--dpi", type=int, default=400,
                     help="Resolution (dots per inch) for saved PNG files.")
     p.add_argument("--axis-labels", choices=["ip_oop", "xyz"], default="xyz",
@@ -380,6 +400,7 @@ def process_file(tiff_path: str, fi, get_unit_fiber, mask, args, out_dirs, fabio
         dpi=args.dpi, axis_label_style=args.axis_labels,
         tick_spacing=args.tick_spacing, subtick_spacing=args.subtick_spacing,
         color_scale=args.color_scale, show_colorbar=args.show_colorbar,
+        tick_color=args.tick_color, axes_linewidth=args.axes_linewidth,
     )
     print(f"  Saved 2D image: {img_out_path}")
 

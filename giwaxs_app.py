@@ -92,8 +92,17 @@ STYLE_DEFAULTS = {
     "vmax_percentile": 99.9,
     "line_color": "#1f77b4",
     "sector_line_color": "#00ffff",
-    "font_family": "DejaVu Sans",
-    "font_size": 11.0,
+    "tick_color": "#ffffff",
+    "axes_linewidth": 1.6,
+    "font_family": "Arial",
+    "font_size": 16.0,
+    # The two font PICKERS are plain selectboxes with no index=, so without
+    # a seeded session_state value each would start at its own index 0
+    # ("Sans-serif" / "Small (8pt)") and the size picker would then write
+    # 8.0 straight over "font_size" above on the first render -- making the
+    # default above unreachable. Seeding them keeps picker and value agreed.
+    "font_category": "Sans-serif",
+    "font_size_preset": "Larger (16pt)",
     "dpi": 400,
     "axis_labels": "xyz",
     "edge_top": "", "edge_bottom": "", "edge_left": "", "edge_right": "",
@@ -112,8 +121,8 @@ st.session_state.setdefault("2d_tick_spacing", 0.5)            # 2D image, 1/A
 st.session_state.setdefault("2d_linecut_tick_spacing", 0.3)    # line cuts, 1/A
 st.session_state.setdefault("2d_subtick_spacing", 0.0)         # 2D image minor ticks, 1/A -- 0 = off
 st.session_state.setdefault("2d_color_scale", "log")
-st.session_state.setdefault("2d_show_colorbar", True)
-st.session_state.setdefault("pf_show_colorbar", True)           # 2D image colorbar mapping
+st.session_state.setdefault("2d_show_colorbar", False)
+st.session_state.setdefault("pf_show_colorbar", False)           # 2D image colorbar mapping
 st.session_state.setdefault("pf_tick_spacing", 20.0)           # pole figure chi axis, deg
 st.session_state.setdefault("processed_2d", None)   # cached heavy-computation results
 st.session_state.setdefault("processed_pf", None)
@@ -633,6 +642,8 @@ def build_2d_results_zip(qip_range, qoop_range) -> bytes:
                 res["res_qx"], res["res_qy"], res["res_I"],
                 out_path=None, qlim_x=qip_range, qlim_y=qoop_range,
                 vmin_percentile=st.session_state["2d_vmin_percentile"],
+                tick_color=st.session_state["2d_tick_color"],
+                axes_linewidth=st.session_state["2d_axes_linewidth"],
                 vmax_percentile=st.session_state.get("2d_vmax_percentile", 99.9),
                 cmap=st.session_state["2d_cmap"],
                 vmin=st.session_state["2d_vmin"] if st.session_state["2d_use_manual_scale"] else None,
@@ -1403,14 +1414,22 @@ def style_widgets(show_cmap: bool, show_sector_color: bool, key_prefix: str):
     with cols[1]:
         st.color_picker("Line colour", key=f"{p}_line_color")
     with cols[2]:
-        font_category = st.selectbox("Font category", list(gc.FONT_CATEGORIES.keys()),
+        category_options = list(gc.FONT_CATEGORIES.keys())
+        # The seeded default ("Sans-serif") is only valid if that category
+        # survived the installed-fonts filter in get_available_font_categories.
+        if st.session_state[f"{p}_font_category"] not in category_options:
+            st.session_state[f"{p}_font_category"] = category_options[0]
+        font_category = st.selectbox("Font category", category_options,
                                       key=f"{p}_font_category")
         font_options = gc.FONT_CATEGORIES[font_category]
         if st.session_state[f"{p}_font_family"] not in font_options:
             st.session_state[f"{p}_font_family"] = font_options[0]
         st.selectbox("Font family", font_options, key=f"{p}_font_family")
     with cols[3]:
-        preset_label = st.selectbox("Font size", list(gc.FONT_SIZE_PRESETS.keys()),
+        size_options = list(gc.FONT_SIZE_PRESETS.keys())
+        if st.session_state[f"{p}_font_size_preset"] not in size_options:
+            st.session_state[f"{p}_font_size_preset"] = size_options[0]
+        preset_label = st.selectbox("Font size", size_options,
                                      key=f"{p}_font_size_preset")
         preset_value = gc.FONT_SIZE_PRESETS[preset_label]
         if preset_value is None:
@@ -1424,6 +1443,22 @@ def style_widgets(show_cmap: bool, show_sector_color: bool, key_prefix: str):
     with cols2[0]:
         if show_sector_color:
             st.color_picker("Sector line colour", key=f"{p}_sector_line_color")
+        if show_cmap:
+            st.number_input(
+                "2D frame / tick width (pt)", min_value=0.4, max_value=5.0,
+                step=0.2, format="%.1f", key=f"{p}_axes_linewidth",
+                help="Matplotlib's default is 0.8 pt, which survives a screen "
+                     "but thins out in print and all but vanishes once a panel "
+                     "is scaled down into a figure. Tick length follows the "
+                     "width. The frame stays black; only the marks take the "
+                     "colour below.")
+            st.color_picker(
+                "2D tick mark colour", key=f"{p}_tick_color",
+                help="The ticks point into the map, so they sit on the image "
+                     "rather than on the page — a dark mark disappears into a "
+                     "log-scaled map. White by default; change it if you use a "
+                     "light colormap. Only the marks are recoloured, not the "
+                     "labels, which stay outside on white.")
     with cols2[1]:
         st.slider("Output resolution (DPI)", 72, 600, key=f"{p}_dpi", step=1)
     with cols2[2]:
@@ -1520,8 +1555,8 @@ with tab_2d:
         key="extra_sectors_2d",
     )
 
-    qip_range = st.slider("q_ip plot range (1/Å)", -3.0, 3.0, (-0.5, 2.4), key="qip_range")
-    qoop_range = st.slider("q_oop plot range (1/Å)", -1.0, 4.0, (-0.25, 2.75), key="qoop_range")
+    qip_range = st.slider("q_ip plot range (1/Å)", -3.0, 3.0, (-0.5, 1.99), key="qip_range")
+    qoop_range = st.slider("q_oop plot range (1/Å)", -1.0, 4.0, (-0.05, 2.49), key="qoop_range")
 
     with st.expander("Box cut — an out-of-plane profile from a fixed q_xy strip"):
         st.caption(
@@ -1971,6 +2006,8 @@ with tab_2d:
                     res["res_qx"], res["res_qy"], res["res_I"],
                     out_path=None, qlim_x=qip_range, qlim_y=qoop_range,
                     vmin_percentile=st.session_state["2d_vmin_percentile"],
+                    tick_color=st.session_state["2d_tick_color"],
+                    axes_linewidth=st.session_state["2d_axes_linewidth"],
                     vmax_percentile=st.session_state.get("2d_vmax_percentile", 99.9),
                     cmap=st.session_state["2d_cmap"],
                     vmin=st.session_state["2d_vmin"] if st.session_state["2d_use_manual_scale"] else None,

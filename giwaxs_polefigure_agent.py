@@ -108,10 +108,13 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                          "as any matplotlib colour spec (name like 'red', "
                          "hex like '#1f77b4', etc.). Default: matplotlib's "
                          "default color cycle.")
-    p.add_argument("--font-family", default=None,
+    p.add_argument("--font-family", default="Arial",
                     help=f"Font family for all plot text. Common choices: "
-                         f"{', '.join(gc.COMMON_FONTS)}.")
-    p.add_argument("--font-size", type=float, default=None,
+                         f"{', '.join(gc.COMMON_FONTS)}. Arial is not "
+                         f"installed on most Linux machines; it is swapped "
+                         f"for the metric-compatible Liberation Sans at "
+                         f"render time, so the result matches either way.")
+    p.add_argument("--font-size", type=float, default=16.0,
                     help="Base font size (points) for all plot text.")
     p.add_argument("--dpi", type=int, default=400,
                     help="Resolution (dots per inch) for saved PNG files.")
