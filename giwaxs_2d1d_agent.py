@@ -84,7 +84,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument("--qoop-plot-range", type=gc.parse_range, default=(-0.25, 2.75),
                     help="Y axis (q_oop) plot limits for the 2D image, as "
                          "'min,max' in inverse Angstrom.")
-    p.add_argument("--vmin-percentile", type=float, default=1.0,
+    p.add_argument("--vmin-percentile", type=float, default=30.0,
                     help="Percentile (of nonzero pixels) used as the log-scale "
                          "colour minimum for the 2D image (ignored if --vmin "
                          "is given explicitly). Raised from a bare minimum so "
@@ -123,6 +123,24 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                          f"{', '.join(gc.COMMON_FONTS)}.")
     p.add_argument("--font-size", type=float, default=None,
                     help="Base font size (points) for all plot text.")
+    p.add_argument("--autodefine-centre", action="store_true",
+                    help="Measure the beam centre from the FIRST data file "
+                         "instead of trusting the .poni or the calibration "
+                         "for it: the column from the frame's mirror "
+                         "symmetry about q_xy = 0, the row from the horizon. "
+                         "Either half that cannot be measured is left as the "
+                         "geometry had it, and the reason is printed. Use "
+                         "this when the calibrant was taken in a different "
+                         "detector position -- a case a calibrant fit cannot "
+                         "detect, since it reports a fine residual anyway.")
+    p.add_argument("--no-fill-qxy-gap", action="store_true",
+                    help="Leave the thin beamstop gap at q_xy = 0 empty. By "
+                         "default it is closed by mirroring the measured "
+                         "side across it (a fibre-textured map is symmetric "
+                         "about q_xy = 0) and interpolating where the mirror "
+                         "is empty too. Cosmetic only: a gap wider than 12 "
+                         "bins, or one not bounded by data on both sides, is "
+                         "never filled, so the missing wedge stays visible.")
     p.add_argument("--no-colorbar", dest="show_colorbar", action="store_false",
                     help="Leave the intensity colour bar off the saved image. "
                          "Useful when the figure will carry its scale "
@@ -283,6 +301,8 @@ def process_file(tiff_path: str, fi, get_unit_fiber, mask, args, out_dirs, fabio
     res_I, res_qx, res_qy = res2d[0:3]
     res_qx = -np.flip(res_qx)
     res_I = np.flip(res_I, axis=1)
+    if not args.no_fill_qxy_gap:
+        res_I, _gap = gc.fill_qxy_gap(res_I, res_qx)
 
     img_out_path = os.path.join(out_dirs["images"], f"{base}_2D_GIWAXS.png")
     gc.plot_2d_image(
@@ -296,6 +316,19 @@ def process_file(tiff_path: str, fi, get_unit_fiber, mask, args, out_dirs, fabio
         color_scale=args.color_scale, show_colorbar=args.show_colorbar,
     )
     print(f"  Saved 2D image: {img_out_path}")
+
+    ok, _off, msg = gc.check_direct_beam_centred(res_qx, res_qy, res_I)
+    if not ok:
+        print(f"  WARNING: {msg}")
+
+    # The check above pins the beam-centre COLUMN. It cannot see the ROW,
+    # which is the badly conditioned half of a grazing-incidence
+    # calibration -- so ask the frame's own horizon about that.
+    row_ok, _row, row_msg = gc.check_beam_row_against_horizon(
+        img_data, incident_angle_deg, fi.dist, fi.detector.pixel1,
+        fi.poni1 / fi.detector.pixel1)
+    if row_ok is False:
+        print(f"  WARNING: {row_msg}")
 
     # --- 1D line cuts ------------------------------------------------------
     incident_angle_rad = np.deg2rad(incident_angle_deg)
@@ -433,6 +466,30 @@ def _main_impl(argv: Optional[List[str]] = None):
     all_ranges = [(-90, -80), (-8, 8)] + list(cli_extra_ranges)
     if not args.non_interactive:
         all_ranges += ask_for_extra_ranges()
+
+    if args.autodefine_centre:
+        first = tiff_files[0]
+        first_angle = gc.resolve_incident_angle_for_file(
+            first, args.incident_angle, args.incident_angle_from_filename,
+            angle_map=angle_map)
+        meas = gc.autodefine_beam_centre(
+            fabio.open(first).data, first_angle, fi.dist, fi.detector.pixel1,
+            centre_guess_col=fi.poni2 / fi.detector.pixel2)
+        print(f"\nAuto-defining the beam centre from {os.path.basename(first)} "
+              f"(incident angle {first_angle:g} deg):")
+        for note in meas["notes"]:
+            print(f"  {note}")
+        if meas["col"] is not None:
+            print(f"  Beam centre X: {fi.poni2 / fi.detector.pixel2:.2f} -> "
+                  f"{meas['col']:.2f} px")
+            fi.poni2 = meas["col"] * fi.detector.pixel2
+        if meas["row"] is not None:
+            print(f"  Beam centre Y: {fi.poni1 / fi.detector.pixel1:.2f} -> "
+                  f"{meas['row']:.2f} px")
+            fi.poni1 = meas["row"] * fi.detector.pixel1
+        if meas["col"] is None and meas["row"] is None:
+            print("  Nothing measurable in that frame -- geometry left unchanged.")
+        print()
 
     fit_rows: List[dict] = []
     for tiff_path in tiff_files:

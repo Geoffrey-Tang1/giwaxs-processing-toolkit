@@ -22,6 +22,7 @@ import json
 import os
 import re
 import sys
+import warnings
 from typing import List, Tuple, Optional, Dict
 
 import numpy as np
@@ -2060,6 +2061,373 @@ def plot_2d_image(qx, qy, intensity, out_path=None, qlim_x=None, qlim_y=None,
             plt.close(fig)
             return None
         return fig
+
+
+def check_direct_beam_centred(qx, qy, intensity,
+                               qz_band: float = 0.12,
+                               qxy_window: float = 0.6,
+                               tolerance: float = 0.05):
+    """Is the direct beam where the geometry says q_xy = 0?
+
+    A grazing-incidence map has the direct beam and the specular rod at
+    q_xy = 0 by definition -- that is not a property of the sample, it is
+    what q_xy means. So their position is a free check on the beam centre
+    that uses the SAMPLE frame itself and needs no calibrant: if the
+    bright low-q feature sits at q_xy = -0.2, the geometry's beam centre
+    column is wrong by however many pixels that is, and every peak
+    position read off the map is wrong with it.
+
+    Worth having because a geometry can be wrong in a way nothing else
+    notices: it may be internally consistent, describe the right detector
+    and come from a real calibration -- just one taken with the detector
+    somewhere else.
+
+    Returns (ok, offset_q, message). offset_q is the intensity-weighted
+    centre of the near-horizon band in 1/Angstrom; NaN when there is not
+    enough signal to judge, in which case ok is True (silence beats a
+    false alarm).
+    """
+    qx = np.asarray(qx, float)
+    qy = np.asarray(qy, float)
+    I = np.asarray(intensity, float)
+    if I.ndim != 2 or qx.ndim != 1 or qy.ndim != 1:
+        return True, float("nan"), ""
+
+    rows = np.abs(qy) <= qz_band          # the near-horizon strip
+    cols = np.abs(qx) <= qxy_window       # around where the beam should be
+    if rows.sum() < 3 or cols.sum() < 10:
+        return True, float("nan"), ""
+
+    band = I[np.ix_(rows, cols)]
+    w = np.where(np.isfinite(band) & (band > 0), band, 0.0).sum(axis=0)
+    if w.sum() <= 0:
+        return True, float("nan"), ""
+
+    # Weight by intensity above the band's own median, so a broadly bright
+    # strip does not drag the centroid; it is the PEAK we are locating.
+    base = np.median(w[w > 0]) if (w > 0).any() else 0.0
+    wt = np.clip(w - base, 0.0, None)
+    if wt.sum() <= 0:
+        return True, float("nan"), ""
+    offset = float((qx[cols] * wt).sum() / wt.sum())
+
+    if abs(offset) <= tolerance:
+        return True, offset, ""
+    return False, offset, (
+        f"The direct beam sits at q_xy = {offset:+.3f} 1/A, but it is q_xy = 0 "
+        f"by definition -- so the beam-centre COLUMN in this geometry is off. "
+        f"Every q read off this map is shifted with it. Check that the "
+        f"geometry belongs to these frames: a .poni or a calibration from a "
+        f"run with the detector in a different position looks perfectly "
+        f"valid and still does this."
+    )
+
+
+HORIZON_SEARCH_ROWS = (0, 450)
+MAX_BEAM_ROW_MISMATCH_PX = 12.0
+
+
+def find_horizon_row(image, search_rows=HORIZON_SEARCH_ROWS, n_blocks: int = 20,
+                      min_block_frac: float = 0.60, agree_px: float = 6.0):
+    """Locate the sample horizon in a grazing-incidence frame.
+
+    The horizon is the one feature a GI frame is guaranteed to carry across
+    the WHOLE detector width: it is the sample surface seen edge-on, so it
+    is a straight line, not an arc, and above it the sample shadows the
+    detector. That full-width straightness is what separates it from the
+    two things it is otherwise easy to confuse it with -- a beamstop edge,
+    which is confined to the stop's own columns, and a Debye arc, which
+    curves away within a few hundred pixels.
+
+    So: split the width into blocks, find the strongest rising edge in each
+    INDEPENDENTLY, and keep the answer only if most blocks agree. Blocks
+    that are mostly dead (beamstop, module gaps) abstain rather than vote.
+
+    Returns (row, agreement_fraction, n_voting_blocks). `row` is None when
+    the blocks do not agree. That is a refusal, not a fallback: a frame
+    with no sample in the beam -- a calibrant exposure, say -- has no
+    horizon to find, and inventing one would be worse than saying so.
+    """
+    image = np.asarray(image)
+    h, w = image.shape
+    lo = int(search_rows[0])
+    hi = int(min(search_rows[1], h))
+    I = np.asarray(image, dtype=float)
+    I = np.where(np.isfinite(I) & (I > 0), I, np.nan)
+    rows = np.arange(lo, hi)
+    edges = np.linspace(0, w, n_blocks + 1).astype(int)
+
+    votes = []
+    for a, b in zip(edges[:-1], edges[1:]):
+        block = I[lo:hi, a:b]
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)  # all-NaN slices
+            prof = np.nanmedian(block, axis=1)
+        dead = ~np.isfinite(prof)
+        if dead.mean() > 0.30:
+            continue                       # beamstop / dead block abstains
+        if dead.any():
+            # Bridge module gaps rather than let their edges masquerade as
+            # the horizon -- a gap is a step in the data too.
+            idx = np.arange(prof.size)
+            prof = np.interp(idx, idx[~dead], prof[~dead])
+        k = 5
+        sm = np.convolve(prof, np.ones(k) / k, mode="same")
+        with np.errstate(divide="ignore", invalid="ignore"):
+            g = np.gradient(np.log(np.clip(sm, 1e-6, None)))
+        g[:k] = 0.0
+        g[-k:] = 0.0
+        votes.append(float(rows[int(np.argmax(g))]))
+
+    if len(votes) < 4:
+        return None, 0.0, len(votes)
+    votes_arr = np.asarray(votes, dtype=float)
+    med = float(np.median(votes_arr))
+    agreeing = np.abs(votes_arr - med) <= agree_px
+    frac = float(np.mean(agreeing))
+    if frac < min_block_frac:
+        return None, frac, len(votes)
+    return float(np.median(votes_arr[agreeing])), frac, len(votes)
+
+
+def beam_row_from_horizon(horizon_row: float, incident_angle_deg: float,
+                           dist: float, pixel_size: float) -> float:
+    """Back out the direct-beam row from the horizon row.
+
+    Rays leaving along the sample surface travel at the incident angle
+    above the direct beam, so the horizon sits that far up the detector:
+        horizon_row = beam_row + dist * tan(alpha) / pixel_size
+    """
+    return float(horizon_row - dist * np.tan(np.deg2rad(incident_angle_deg)) / pixel_size)
+
+
+def check_beam_row_against_horizon(image, incident_angle_deg: float, dist: float,
+                                    pixel_size: float, declared_beam_row: float,
+                                    tolerance_px: float = MAX_BEAM_ROW_MISMATCH_PX):
+    """Check a geometry's beam-centre ROW against the frame's own horizon.
+
+    This exists because the row is the badly-conditioned half of a
+    grazing-incidence calibration. The beam centre sits near the detector
+    edge, so every calibrant ring is cut off on that side and only its
+    lower arc is ever recorded. Fitting a centre to an arc missing its top
+    leaves the row nearly degenerate with the distance -- the fit reports a
+    sub-pixel residual either way. The column, sampled on both sides, is
+    over-determined and comes out right; the row can be tens of pixels out
+    and nothing in the fit complains.
+
+    The sample frame carries the answer the calibrant cannot give, so use
+    it. Returns (ok, measured_row, message). `ok` is None -- neither pass
+    nor fail -- when the frame has no usable horizon, since absence of
+    evidence is not a disagreement.
+    """
+    horizon, frac, n_blocks = find_horizon_row(image)
+    if horizon is None:
+        return None, None, (
+            f"No full-width horizon in this frame (only {frac:.0%} of "
+            f"{n_blocks} column blocks agreed), so the beam-centre row "
+            f"could not be cross-checked against the data."
+        )
+    measured = beam_row_from_horizon(horizon, incident_angle_deg, dist, pixel_size)
+    delta = measured - declared_beam_row
+    if abs(delta) <= tolerance_px:
+        return True, measured, ""
+    return False, measured, (
+        f"This frame's own horizon puts the direct beam at row {measured:.1f}, "
+        f"but the geometry declares row {declared_beam_row:.1f} -- a "
+        f"{abs(delta):.0f} px disagreement. The horizon is the sample surface "
+        f"seen edge-on and spans the full detector width ({frac:.0%} of "
+        f"{n_blocks} column blocks agreed on it), so it is measured, not "
+        f"assumed. A calibrant cannot settle this: with the beam centre near "
+        f"the detector edge every ring is cut off, leaving the row nearly "
+        f"free. Peak POSITIONS move very little, but the rings are smeared, "
+        f"so peak widths and any coherence length read off them are wrong."
+    )
+
+
+def find_beam_col_from_symmetry(image, centre_guess=None, search_half_width: int = 60,
+                                 row_band=None, max_lever: int = 400, row_bin: int = 8,
+                                 min_contrast: float = 0.05):
+    """Locate the beam-centre COLUMN from the frame's own mirror symmetry.
+
+    A fibre-textured film has no preferred in-plane direction, so its
+    scattering is symmetric about the plane holding the surface normal and
+    the beam -- on the detector, a mirror line through the beam column.
+    The column that makes the frame most nearly equal to its own
+    reflection therefore IS the beam column, and no calibrant is involved.
+    A calibrant frame works too, for a different reason: its rings are
+    centro-symmetric. So this measures the half of the geometry a
+    calibrant gets RIGHT, and is a cross-check rather than a replacement.
+
+    Returns (col, contrast). `col` is None when the score curve is flat
+    (no mirror symmetry in this frame) or when the best column lands on
+    the edge of the search window (the true centre is outside it) --
+    either way a refusal, never the window edge dressed up as an answer.
+    """
+    I = np.asarray(image, dtype=float)
+    h, w = I.shape
+    r0, r1 = row_band if row_band else (int(0.10 * h), int(0.65 * h))
+    band = I[r0:r1, :]
+    nb = (band.shape[0] // row_bin) * row_bin
+    if nb < row_bin:
+        return None, 0.0
+    band = band[:nb].reshape(-1, row_bin, w).mean(axis=1)
+    good = np.isfinite(band) & (band > 0)
+    L = np.where(good, np.log10(np.clip(band, 1e-3, None)), np.nan)
+
+    c0 = int(centre_guess) if centre_guess is not None else w // 2
+    cands = np.arange(max(1, c0 - search_half_width), min(w - 1, c0 + search_half_width + 1))
+    if cands.size < 5:
+        return None, 0.0
+    scores = np.full(cands.size, np.nan)
+    for i, c in enumerate(cands):
+        k = int(min(c, w - 1 - c, max_lever))
+        if k < 50:
+            continue
+        left = L[:, c - k:c][:, ::-1]
+        right = L[:, c + 1:c + 1 + k]
+        m = np.isfinite(left) & np.isfinite(right)
+        if m.sum() < 0.3 * left.size:
+            continue
+        scores[i] = float(np.abs(left[m] - right[m]).mean())
+    if np.all(np.isnan(scores)):
+        return None, 0.0
+
+    i = int(np.nanargmin(scores))
+    lo, hi = np.nanpercentile(scores, [0, 95])
+    contrast = float((hi - lo) / hi) if hi > 0 else 0.0
+    if contrast < min_contrast or i == 0 or i == cands.size - 1:
+        return None, contrast
+    off = 0.0
+    if 0 < i < cands.size - 1 and np.all(np.isfinite(scores[i - 1:i + 2])):
+        y0, y1, y2 = scores[i - 1:i + 2]
+        denom = y0 - 2 * y1 + y2
+        if denom != 0:
+            off = float(np.clip(0.5 * (y0 - y2) / denom, -1.0, 1.0))
+    return float(cands[i] + off), contrast
+
+
+def autodefine_beam_centre(image, incident_angle_deg: float, dist: float,
+                            pixel_size: float, centre_guess_col=None):
+    """Measure the beam centre and the horizon from one sample frame.
+
+    The two halves come from two different symmetries, which is the point:
+    neither leans on a calibrant, and neither can quietly stand in for the
+    other if its own evidence is missing.
+
+      column  <- the frame equals its own mirror image about q_xy = 0
+      row     <- the horizon sits one incident angle above the direct beam
+
+    Each is reported independently and either may come back None. A result
+    with one half measured and the other missing is the honest outcome for
+    a frame that only supports one of them, and is more useful than a
+    complete answer with an invented half in it.
+
+    Returns a dict: col, col_contrast, row, horizon_row, horizon_agreement,
+    horizon_blocks, notes (a list of plain-language strings).
+    """
+    notes = []
+    col, contrast = find_beam_col_from_symmetry(image, centre_guess=centre_guess_col)
+    if col is None:
+        notes.append(
+            f"Beam COLUMN not measurable from this frame (mirror-symmetry "
+            f"contrast {contrast:.2f})."
+            + (f" The best match also ran to the edge of the +/-60 px search "
+               f"window around {int(centre_guess_col)}, so the true column is "
+               f"probably outside it." if centre_guess_col is not None else "")
+        )
+    else:
+        notes.append(f"Beam column {col:.2f} px, from mirror symmetry "
+                     f"(contrast {contrast:.2f}).")
+
+    horizon, agreement, n_blocks = find_horizon_row(image)
+    if horizon is None:
+        row = None
+        notes.append(
+            f"No full-width horizon in this frame (only {agreement:.0%} of "
+            f"{n_blocks} column blocks agreed), so the beam ROW could not be "
+            f"measured. A frame with no sample in the beam -- a calibrant "
+            f"exposure -- has no horizon to find."
+        )
+    else:
+        row = beam_row_from_horizon(horizon, incident_angle_deg, dist, pixel_size)
+        notes.append(
+            f"Horizon at row {horizon:.1f} ({agreement:.0%} of {n_blocks} "
+            f"column blocks agreed), so at an incident angle of "
+            f"{incident_angle_deg:g} deg the beam row is {row:.1f} px."
+        )
+    return {
+        "col": col, "col_contrast": contrast,
+        "row": row, "horizon_row": horizon,
+        "horizon_agreement": agreement, "horizon_blocks": n_blocks,
+        "notes": notes,
+    }
+
+
+def fill_qxy_gap(intensity, qx, max_width: int = 12):
+    """Close the thin beamstop gap at q_xy = 0 in a remapped map.
+
+    The beamstop leaves a narrow empty stripe at q_xy = 0 that a reader
+    sees as a line ruled down the middle of the figure. A fibre-textured
+    GI map is symmetric about q_xy = 0, so mirror the measured side across
+    the gap, and interpolate across wherever the mirror is empty too.
+
+    Done row by row, because the stripe is not a constant width: the
+    beamstop subtends more bins near the origin than far from it, so a
+    column-wise rule would leave the widest, most visible part of it
+    unfilled.
+
+    This is cosmetic and deliberately timid. Per row it fills only a gap
+    that straddles q_xy = 0, is bounded by measured data on BOTH sides,
+    and is no wider than `max_width` bins. The missing wedge is far wider
+    than that at every height, so it can never be painted over -- it is
+    genuinely unmeasured and has to stay visible.
+
+    Returns (filled_intensity, (q_lo, q_hi)) where the q pair brackets the
+    widest row that was filled, or (intensity, None) if nothing was.
+    """
+    I = np.array(intensity, dtype=float, copy=True)
+    qx = np.asarray(qx, dtype=float)
+    n = qx.size
+    j0 = int(np.argmin(np.abs(qx)))
+    # mirror index for every column, precomputed
+    mirror = np.abs(qx[:, None] + qx[None, :]).argmin(axis=1)
+
+    widest = -1
+    span = None
+    for r in range(I.shape[0]):
+        row = I[r]
+        dead = ~np.isfinite(row) | (row <= 0)
+        if not dead[j0]:
+            continue
+        lo = j0
+        while lo - 1 >= 0 and dead[lo - 1]:
+            lo -= 1
+        hi = j0
+        while hi + 1 < n and dead[hi + 1]:
+            hi += 1
+        width = hi - lo + 1
+        if width > max_width or lo == 0 or hi == n - 1:
+            continue
+        for j in range(lo, hi + 1):
+            jm = int(mirror[j])
+            if lo <= jm <= hi:
+                continue
+            v = row[jm]
+            if np.isfinite(v) and v > 0:
+                row[j] = v
+        still = ~np.isfinite(row[lo:hi + 1]) | (row[lo:hi + 1] <= 0)
+        if still.any():
+            a, b = row[lo - 1], row[hi + 1]
+            w = np.linspace(0.0, 1.0, width + 2)[1:-1]
+            for k, j in enumerate(range(lo, hi + 1)):
+                if still[k]:
+                    row[j] = a * (1.0 - w[k]) + b * w[k]
+        if width > widest:
+            widest = width
+            span = (float(qx[lo]), float(qx[hi]))
+    if span is None:
+        return intensity, None
+    return I, span
 
 
 def add_angle_lines(ax, qip, qoop, angles: Tuple[float, float], color="cyan"):

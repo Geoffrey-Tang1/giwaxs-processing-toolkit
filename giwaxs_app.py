@@ -41,6 +41,44 @@ st.set_page_config(page_title="GIWAXS Processing Toolkit", layout="wide")
 
 
 # --------------------------------------------------------------------------- #
+# Guard against a stale giwaxs_common
+# --------------------------------------------------------------------------- #
+# Streamlit re-executes THIS script when the code changes, but it does not
+# re-import modules that are already in sys.modules. So after an update
+# that touches both files, the new giwaxs_app.py can end up calling into
+# the giwaxs_common.py that was loaded before the update -- and the first
+# thing it reaches for that the old module hasn't got raises
+# AttributeError in the middle of building the page, which Streamlit shows
+# as a redacted crash with no hint about what to do.
+#
+# Checking up front turns that into one sentence with the fix in it. The
+# list is the names this file actually uses from gc that were added at
+# some point; a missing one means the two files are out of step, and the
+# right move is always the same: restart the process so the import runs
+# again.
+_REQUIRED_FROM_COMMON = (
+    "MAX_PLAUSIBLE_INCIDENT_ANGLE_DEG",
+    "validate_geometry",
+    "estimate_geometry_from_rings",
+    "cache_png_bytes",
+    "validate_manual_color_scale",
+)
+_missing = [n for n in _REQUIRED_FROM_COMMON if not hasattr(gc, n)]
+if _missing:
+    st.error(
+        "**The app and `giwaxs_common.py` are out of step.**\n\n"
+        "This page was reloaded with newer code, but Python is still using "
+        "the copy of `giwaxs_common.py` it imported earlier — Streamlit "
+        "re-runs the script on an update, it does not re-import modules.\n\n"
+        "**Fix:** open *Manage app* (lower right) and choose **Reboot app**. "
+        "That restarts the process so both files are loaded together.\n\n"
+        f"Missing from the loaded `giwaxs_common`: "
+        f"`{'`, `'.join(_missing)}`"
+    )
+    st.stop()
+
+
+# --------------------------------------------------------------------------- #
 # Session-state defaults (so widgets and the AI assistant can both set these
 # without conflicting -- widgets are always created with key=... only, never
 # both key= and value=, so whichever was last written to session_state wins)
@@ -50,7 +88,8 @@ STYLE_DEFAULTS = {
     "use_manual_scale": False,
     "vmin": 100.0,
     "vmax": 100000.0,
-    "vmin_percentile": 2.0,
+    "vmin_percentile": 30.0,
+    "fill_qxy_gap": True,
     "vmax_percentile": 99.9,
     "line_color": "#1f77b4",
     "sector_line_color": "#00ffff",
@@ -88,6 +127,9 @@ st.session_state.setdefault("processed_pf", None)
 # unticking the box processed everything at the default Cu K-alpha
 # instead of the beamline's actual wavelength.
 st.session_state.setdefault("active_geometry", None)
+st.session_state.setdefault("pending_geometry_choice", None)
+st.session_state.setdefault("centre_override", None)
+st.session_state.setdefault("measured_centre", None)
 st.session_state.setdefault("calibration_confirmed", False)
 st.session_state.setdefault("calibration_diagnostic_path", None)
 st.session_state.setdefault("calibration_rms_px", None)
@@ -715,6 +757,39 @@ with st.sidebar:
     )
 
     st.header("2. Geometry")
+    _choice = st.session_state.get("pending_geometry_choice")
+    if _choice:
+        _r, _e = _choice["refined"], _choice["existing"]
+        _pix = _r["detector"].pixel1
+        st.warning(
+            f"**The calibration and your .poni disagree — pick one.**\n\n"
+            f"They differ by **{_choice['gap_px']:.0f} px** in beam centre and "
+            f"**{_choice['dist_pct']:+.1f}%** in distance. That is too much to "
+            f"be refinement noise: the calibrant frame was most likely "
+            f"recorded with the detector somewhere else than your samples "
+            f"were. Nothing here can tell which one describes the SAMPLE "
+            f"data, so nothing has been applied yet.\n\n"
+            f"| | beam centre (col, row) px | distance (m) |\n"
+            f"|---|---|---|\n"
+            f"| `{_e['label']}` | {_e['poni2']/_pix:.1f}, {_e['poni1']/_pix:.1f} "
+            f"| {_e['dist']:.5f} |\n"
+            f"| refined from `{_r['source']}` | {_r['poni2']/_pix:.1f}, "
+            f"{_r['poni1']/_pix:.1f} | {_r['dist']:.5f} |\n\n"
+            f"If you are unsure: process one frame each way and look at where "
+            f"the direct beam lands. It must sit at q_xy = 0."
+        )
+        _c1, _c2 = st.columns(2)
+        if _c1.button(f"Keep the .poni ({_e['label']})", key="geom_keep_poni",
+                       width="stretch"):
+            st.session_state["pending_geometry_choice"] = None
+            st.session_state["active_geometry"] = None
+            st.rerun()
+        if _c2.button(f"Use the calibration ({_r['source']})",
+                       key="geom_use_refined", type="primary", width="stretch"):
+            st.session_state["active_geometry"] = _r
+            st.session_state["pending_geometry_choice"] = None
+            st.rerun()
+
     _active = _active_geometry()
     if _active is not None:
         st.info(
@@ -858,7 +933,16 @@ with st.sidebar:
                     # measurement as the distance and the PONI, and
                     # separating them is how a 1.86x error in every q
                     # value gets in.
-                    st.session_state["active_geometry"] = {
+                    # A calibration refined against a calibrant frame and a
+                    # .poni the user supplied are two claims about the same
+                    # experiment, and when they disagree the software cannot
+                    # tell which one describes the SAMPLE data: the calibrant
+                    # frame may have been recorded in a different detector
+                    # position entirely (an 'ex situ' standard, a different
+                    # camera length). Picking for them is how every map ends
+                    # up shifted with nothing reporting it. So when they
+                    # differ materially, hold the result aside and ask.
+                    _refined = {
                         "dist": result["dist"],
                         "poni1": result["poni1"],
                         "poni2": result["poni2"],
@@ -872,6 +956,26 @@ with st.sidebar:
                         "centre_mismatch_px": result.get("centre_mismatch_px"),
                         "guess_replaced": result.get("guess_replaced", False),
                     }
+                    _prev = None
+                    if use_poni_file:
+                        _prev = {"dist": guess_dist, "poni1": guess_poni1,
+                                  "poni2": guess_poni2, "label": poni_upload.name}
+                    _gap_px = None
+                    if _prev is not None:
+                        _gap_px = float(np.hypot(
+                            (_refined["poni2"] - _prev["poni2"]) / detector.pixel2,
+                            (_refined["poni1"] - _prev["poni1"]) / detector.pixel1))
+                    if _gap_px is not None and _gap_px > 20.0:
+                        st.session_state["pending_geometry_choice"] = {
+                            "refined": _refined, "existing": _prev,
+                            "gap_px": _gap_px,
+                            "dist_pct": 100.0 * (_refined["dist"] - _prev["dist"])
+                                        / _prev["dist"],
+                        }
+                        st.session_state["active_geometry"] = None
+                    else:
+                        st.session_state["active_geometry"] = _refined
+                        st.session_state["pending_geometry_choice"] = None
                     # Mirror into the manual boxes too, so the numbers are
                     # visible and editable -- but they are no longer what
                     # the processing reads.
@@ -934,13 +1038,14 @@ with st.sidebar:
              "Filenames often carry several such values — "
              "'Q1_01_35p0_0p1_0627.tif' has a contact angle (35.0) as well "
              "as the incident angle (0.1). Only values of "
-             f"{gc.MAX_PLAUSIBLE_INCIDENT_ANGLE_DEG:g} deg or less are "
+             f"{getattr(gc, 'MAX_PLAUSIBLE_INCIDENT_ANGLE_DEG', 5.0):g} deg or less are "
              "considered, since a grazing-incidence angle is always a "
              "fraction of a degree, so the 35.0 is ignored.\n\n"
              "If a name has no usable value, or more than one plausible "
              "one, the fixed value above is used for that file instead and "
              "the reason is written in the log.",
     )
+
 
     mask_upload = st.file_uploader("Mask file (optional)", type=["tif", "tiff", "npy"], key="mask_upload")
 
@@ -949,6 +1054,16 @@ with st.sidebar:
             "Integration bins (npt)", step=100, key="npt",
             help="Resolution of the re-gridded q-space image/profiles. "
                  "Higher = finer but slower. You usually don't need to touch this.",
+        )
+        fill_qxy_gap = st.checkbox(
+            "Close the thin beamstop gap at q_xy = 0", key="fill_qxy_gap",
+            help="The beamstop leaves a narrow empty stripe at q_xy = 0 that "
+                 "reads as a line ruled down the middle of the figure. A "
+                 "fibre-textured map is symmetric about q_xy = 0, so the "
+                 "measured side is mirrored across the gap and interpolated "
+                 "where the mirror is empty too. Cosmetic: it only fills a gap "
+                 "already bounded by data on both sides, and never touches the "
+                 "missing wedge, which is genuinely unmeasured.",
         )
 
 
@@ -1042,6 +1157,15 @@ def build_geometry():
                     save_upload_to_temp(uploaded_files[0])).data.shape
             except Exception:
                 img_shape = None          # unreadable file is reported later
+        # A measured centre wins over whatever the geometry above said --
+        # it came from these frames, and the .poni may not have.
+        _ov = st.session_state.get("centre_override")
+        if _ov:
+            if _ov.get("row") is not None:
+                poni1 = _ov["row"] * detector.pixel1
+            if _ov.get("col") is not None:
+                poni2 = _ov["col"] * detector.pixel2
+
         problems = gc.validate_geometry(detector, dist, poni1, poni2, wl,
                                          image_shape=img_shape, strict=False)
         if problems:
@@ -1322,7 +1446,11 @@ def style_widgets(show_cmap: bool, show_sector_color: bool, key_prefix: str):
     else:
         pc1, pc2 = st.columns(2)
         with pc1:
-            st.slider("Colour-scale minimum percentile", 0.0, 10.0, key=f"{p}_vmin_percentile")
+            # Up to 50, not 10. In a GIWAXS frame the bottom third of the
+            # histogram is nearly all background, so a low vmin spends most
+            # of a log colour scale rendering noise. Around 30 is where the
+            # scattering features get the whole range.
+            st.slider("Colour-scale minimum percentile", 0.0, 50.0, key=f"{p}_vmin_percentile")
         with pc2:
             st.slider("Colour-scale maximum percentile", 90.0, 100.0, key=f"{p}_vmax_percentile")
 
@@ -1346,12 +1474,99 @@ with tab_2d:
     qip_range = st.slider("q_ip plot range (1/Å)", -3.0, 3.0, (-0.5, 2.4), key="qip_range")
     qoop_range = st.slider("q_oop plot range (1/Å)", -1.0, 4.0, (-0.25, 2.75), key="qoop_range")
 
+    # ---- Auto-define the beam centre from the data itself ---------------
+    # A calibrant pins the COLUMN well and leaves the ROW nearly free (the
+    # beam sits near the detector edge, so every ring is cut off and the
+    # row trades against the distance at constant residual). The sample
+    # frame settles both on its own, so offer that as a first-class step
+    # rather than making the user read a warning and type a number.
+    with st.expander("Auto-define beam centre + baseline from the data"):
+        st.caption(
+            "Measures the beam centre from one of your own frames, with no "
+            "calibrant: the COLUMN from the frame's mirror symmetry about "
+            "q_xy = 0, and the ROW from the horizon — the sample surface "
+            "seen edge-on, which sits one incident angle above the direct "
+            "beam. Either half is reported as unmeasurable rather than "
+            "guessed."
+        )
+        if not uploaded_files:
+            st.info("Upload a data file first — this measures it, not a calibrant.")
+        else:
+            names = [u.name for u in uploaded_files]
+            pick = st.selectbox("Measure from", names, key="autodefine_file")
+            if st.button("Measure now", key="btn_autodefine"):
+                try:
+                    _fi, _gu, _mask, _fabio, _err = build_geometry()
+                    if _err:
+                        st.error(f"Need a working geometry first: {_err}")
+                    else:
+                        _uf = uploaded_files[names.index(pick)]
+                        _img = _fabio.open(save_upload_to_temp(_uf)).data
+                        _ang = gc.resolve_incident_angle_for_file(
+                            _uf.name, incident_angle, incident_angle_from_filename)
+                        st.session_state["measured_centre"] = dict(
+                            gc.autodefine_beam_centre(
+                                _img, _ang, _fi.dist, _fi.detector.pixel1,
+                                centre_guess_col=_fi.poni2 / _fi.detector.pixel2),
+                            source=_uf.name, angle=_ang,
+                            declared_col=_fi.poni2 / _fi.detector.pixel2,
+                            declared_row=_fi.poni1 / _fi.detector.pixel1,
+                        )
+                        st.rerun()
+                except Exception as exc:
+                    st.error(f"Could not measure: {exc}")
+
+        _m = st.session_state.get("measured_centre")
+        if _m:
+            st.markdown(f"**From `{_m['source']}`** (incident angle {_m['angle']:g} deg)")
+            st.table({
+                "": ["Beam centre X (col)", "Beam centre Y (row)"],
+                "declared": [f"{_m['declared_col']:.2f}", f"{_m['declared_row']:.2f}"],
+                "measured": [
+                    "—" if _m["col"] is None else f"{_m['col']:.2f}",
+                    "—" if _m["row"] is None else f"{_m['row']:.2f}",
+                ],
+                "difference": [
+                    "—" if _m["col"] is None else f"{_m['col'] - _m['declared_col']:+.2f} px",
+                    "—" if _m["row"] is None else f"{_m['row'] - _m['declared_row']:+.2f} px",
+                ],
+            })
+            for _n in _m["notes"]:
+                st.caption(_n)
+            _c1, _c2 = st.columns(2)
+            with _c1:
+                if st.button("Use these values", key="btn_apply_centre",
+                              disabled=_m["col"] is None and _m["row"] is None):
+                    st.session_state["centre_override"] = {
+                        "col": _m["col"], "row": _m["row"], "source": _m["source"],
+                    }
+                    st.rerun()
+            with _c2:
+                if st.button("Discard", key="btn_clear_measured"):
+                    st.session_state["measured_centre"] = None
+                    st.rerun()
+
+    _ov = st.session_state.get("centre_override")
+    if _ov:
+        _parts = []
+        if _ov.get("col") is not None:
+            _parts.append(f"column {_ov['col']:.2f}")
+        if _ov.get("row") is not None:
+            _parts.append(f"row {_ov['row']:.2f}")
+        st.warning(f"Beam centre overridden to {' and '.join(_parts)}, "
+                   f"measured from `{_ov['source']}`. Everything below uses this, "
+                   f"not the .poni or calibration value.")
+        if st.button("Revert to the geometry above", key="btn_clear_override"):
+            st.session_state["centre_override"] = None
+            st.rerun()
+
     if st.button("Process 2D image + line cuts", type="primary") and uploaded_files:
         fi, get_unit_fiber, mask_args, fabio, err = build_geometry()
         if err:
             st.error(f"Geometry error: {err}")
         else:
             results = []
+            row_warning = ""
             progress_bar = st.progress(0.0)
             status_text = st.empty()
             n_files = len(uploaded_files)
@@ -1370,6 +1585,17 @@ with tab_2d:
                     if incident_angle_from_filename:
                         st.caption(f"{uf.name}: using incident angle = {angle_deg} deg")
 
+                    if i == 0:
+                        # The direct-beam check further down pins the beam-centre
+                        # COLUMN. It cannot see the ROW, which is the badly
+                        # conditioned half of a grazing-incidence calibration.
+                        # The frame's own horizon can, so ask it here -- while
+                        # the raw image is still in hand, since it is not kept.
+                        _r_ok, _r_row, _r_msg = gc.check_beam_row_against_horizon(
+                            img, angle_deg, fi.dist, fi.detector.pixel1,
+                            fi.poni1 / fi.detector.pixel1)
+                        row_warning = _r_msg if _r_ok is False else ""
+
                     res2d = fi.integrate2d_grazing_incidence(
                         img, npt_ip=int(npt), npt_oop=int(npt),
                         unit_ip=unit_ip, unit_oop=unit_oop, mask=mask,
@@ -1377,6 +1603,8 @@ with tab_2d:
                     res_I, res_qx, res_qy = res2d[0:3]
                     res_qx = -np.flip(res_qx)
                     res_I = np.flip(res_I, axis=1)
+                    if fill_qxy_gap:
+                        res_I, _gap = gc.fill_qxy_gap(res_I, res_qx)
 
                     sectors = [(-90, -80), (-8, 8)]
                     for pair in extra_sector_text.split(","):
@@ -1421,6 +1649,18 @@ with tab_2d:
                     st.error(f"Failed to process {uf.name}: {exc}")
                 progress_bar.progress((i + 1) / n_files)
             status_text.text(f"Done -- processed {n_files} file(s).")
+            # Free check on the beam centre using the sample frames
+            # themselves: the direct beam is at q_xy = 0 by definition, so
+            # if it is not, the geometry does not belong to these frames --
+            # which a .poni or a calibration from another detector position
+            # will not reveal any other way.
+            if results:
+                _ok, _off, _msg = gc.check_direct_beam_centred(
+                    results[0]["res_qx"], results[0]["res_qy"], results[0]["res_I"])
+                if not _ok:
+                    st.warning(f"**Check the geometry.** {_msg}")
+                if row_warning:
+                    st.warning(f"**Check the beam-centre row.** {row_warning}")
             st.session_state["processed_2d"] = results
             st.session_state["_2d_zip_path"] = None  # invalidate any stale cached zip
             st.session_state["_2d_plot_png_cache"] = {}  # invalidate any stale cached images
