@@ -2302,6 +2302,381 @@ def find_beamstop_mask(image, beam_col, rel_threshold: float = 0.30,
     return mask
 
 
+def write_linecut_workbook(out_path, combined=None, sources=None, report=None,
+                            extra_sheets=None, source_file=None):
+    """Write line cuts to .xlsx, with the join's provenance beside them.
+
+    A combined curve is two measurements reconciled into one, and a bare
+    column of numbers carries no trace of that. Anyone who opens the
+    file later -- including the person who made it -- cannot tell which
+    part came from which cut, what scale factor was applied, or how well
+    the two actually agreed. So the workbook keeps three things
+    together: the combined curve, the cuts it was built from, and the
+    numbers behind the join.
+
+    combined:     (q, intensity) or None
+    sources:      {"sheet name": (q, intensity)}
+    report:       the dict stitch_cuts() returns
+    extra_sheets: {"sheet name": (q, intensity)} for any other cuts
+    """
+    try:
+        from openpyxl import Workbook
+    except ImportError:
+        _raise_error(
+            "Writing .xlsx needs openpyxl, which is not installed. "
+            "Install it with `pip install openpyxl`, or take the .txt line "
+            "cuts saved alongside instead -- they carry the same numbers."
+        )
+
+    wb = Workbook()
+    wb.remove(wb.active)
+
+    def _add(name, q, intensity):
+        ws = wb.create_sheet(title=name[:31])
+        ws.append(["q (1/A)", "Intensity (a.u.)"])
+        for a, b in zip(np.asarray(q).tolist(), np.asarray(intensity).tolist()):
+            ws.append([float(a), float(b)])
+        ws.freeze_panes = "A2"
+        ws.column_dimensions["A"].width = 14
+        ws.column_dimensions["B"].width = 18
+        return ws
+
+    if combined is not None:
+        _add("combined", combined[0], combined[1])
+    for name, (q, i) in (sources or {}).items():
+        _add(name, q, i)
+    for name, (q, i) in (extra_sheets or {}).items():
+        _add(name, q, i)
+
+    ws = wb.create_sheet(title="method")
+    ws.column_dimensions["A"].width = 30
+    ws.column_dimensions["B"].width = 80
+    rows = [("source file", source_file or "")]
+    joined_by_scaling = False
+    if isinstance(report, dict):
+        rows.append(("combined curve produced",
+                     "yes" if report.get("joined") else "NO"))
+        rows.append(("method", report.get("primary", "")))
+        ov = report.get("overlap")
+        if ov:
+            rows.append(("overlap q (1/A)", f"{ov[0]:.4f} - {ov[1]:.4f}"))
+        if report.get("n_overlap"):
+            rows.append(("shared points used", report["n_overlap"]))
+        if report.get("scale") is not None:
+            joined_by_scaling = True
+            rows.append(("scale factor (low/high cut)", round(report["scale"], 5)))
+        if report.get("shape_scatter") is not None:
+            rows.append(("shape agreement (dex)", round(report["shape_scatter"], 5)))
+        if report.get("message"):
+            rows.append(("note", report["message"]))
+    rows.append(("", ""))
+    if joined_by_scaling:
+        rows += [
+            ("what the scale factor is",
+             "The two cuts have different angular acceptance, so their "
+             "absolute scales differ. One was multiplied onto the other over "
+             "the overlap."),
+            ("what shape agreement means",
+             "Scatter of the two cuts' ratio about its median, in dex. A "
+             "scale factor alone proves nothing -- two curves can always be "
+             "matched at one point. Small scatter is what says they are the "
+             "same curve. The join is refused above 0.12 dex."),
+        ]
+    else:
+        rows += [
+            ("how the window works",
+             "One region, not two cuts reconciled. Its inner edge stays at "
+             "the beamstop's outer edge, where data begins; its outer edge is "
+             "whichever is wider, the fixed strip or an angular limit growing "
+             "with q. Near the origin that is the strip, passing beside the "
+             "beamstop; further out it is the sector, clear of the missing "
+             "wedge."),
+            ("why that matters",
+             "There is no scale factor between differing acceptances and "
+             "nothing to check agreement on, because nothing was joined. The "
+             "two sheets beside this one are the conventional cuts, kept for "
+             "comparison only."),
+            ("abscissa",
+             "Reported as |q|, not the bare q_z: the window sits at a "
+             "non-zero q_xy offset, so this puts its peaks where an angular "
+             "cut's are."),
+        ]
+    for a, b in rows:
+        ws.append([a, b])
+    for row in ws.iter_rows(min_col=2, max_col=2):
+        for cell in row:
+            cell.alignment = cell.alignment.copy(wrap_text=True, vertical="top")
+    wb.save(out_path)
+    return out_path
+
+
+def plot_stitch_diagnostic(q_box, i_box, q_sector, i_sector,
+                            q_combined=None, i_combined=None, report=None,
+                            out_path=None, title=None, show_combined: bool = False,
+                            switch_q: Optional[float] = None,
+                            font_family: Optional[str] = None,
+                            font_size: Optional[float] = None,
+                            dpi: int = DEFAULT_DPI,
+                            figsize: Tuple[float, float] = (8.0, 5.5),
+                            q_range: Optional[Tuple[float, float]] = None):
+    """Put the two source cuts on one axes, as a companion to the join.
+
+    A joined curve hides its own provenance: nothing in it says which
+    part came from where, or that two measurements were reconciled to
+    make it. This puts the inputs back on the page, with the overlap
+    they were matched over and the span they were crossfaded across, so
+    the join can be judged rather than taken on trust. Worth looking at
+    before quoting anything measured off the combined curve.
+
+    The combined curve itself is left OFF by default, which is the whole
+    point: it follows the strip almost exactly over most of the range
+    and draws straight over it, hiding the very line a reader needs to
+    see. It is a separate output anyway. Pass show_combined=True to
+    overlay it.
+
+    `report` is the dict stitch_cuts() returns; its scale and shape
+    agreement are printed on the plot.
+    """
+    with style_context(font_family, font_size):
+        fig, ax = plt.subplots(figsize=figsize)
+        if switch_q:
+            ax.axvline(switch_q, color="0.4", ls="--", lw=1.0,
+                       label=f"window opens ({switch_q:.2f} 1/\u00c5)")
+        ov = report.get("overlap") if isinstance(report, dict) else None
+        if ov:
+            lo, hi = float(ov[0]), float(ov[1])
+            ax.axvspan(lo, hi, color="0.5", alpha=0.12, lw=0,
+                       label="overlap used to match scales")
+            span = 0.3
+            start = 10 ** (np.log10(hi) - span * (np.log10(hi) - np.log10(lo)))
+            ax.axvspan(start, hi, color="tab:orange", alpha=0.18, lw=0,
+                       label="crossfade")
+        ax.plot(q_box, i_box, lw=1.4, color="tab:blue", label="box cut (strip)")
+        ax.plot(q_sector, i_sector, lw=1.4, color="tab:red",
+                label="angular sector")
+        if show_combined and q_combined is not None:
+            ax.plot(q_combined, i_combined, lw=1.8, color="k", alpha=0.8,
+                    label="combined")
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        if q_range:
+            ax.set_xlim(*q_range)
+        ax.set_xlabel(r"$q$ ($\AA^{-1}$)")
+        ax.set_ylabel("Intensity (a.u.)")
+        ax.tick_params(axis="both", which="both", direction="in")
+        ax.set_title(title or "The two cuts behind the combined profile")
+        if isinstance(report, dict) and report.get("joined"):
+            _sc = report.get("scale")
+            _note = (f"scale {_sc:.3f}  ·  "
+                     f"shape {report.get('shape_scatter', float('nan')):.3f} dex  ·  "
+                     f"{report.get('n_overlap', 0)} shared points"
+                     if _sc is not None else report.get("primary", ""))
+            ax.text(0.99, 0.02, _note,
+                    transform=ax.transAxes, fontsize=8, color="0.35",
+                    ha="right", va="bottom")
+        ax.legend(fontsize=8, loc="upper right", framealpha=0.9)
+        fig.tight_layout()
+        if out_path:
+            fig.savefig(out_path, dpi=dpi)
+            plt.close(fig)
+            return None
+        return fig
+
+
+def adaptive_cut(intensity, qx, qy, inner: float = 0.025, outer: float = 0.05,
+                  angle_deg: float = 8.0, as_qtotal: bool = True):
+    """One out-of-plane cut spanning the whole q range, without a join.
+
+    The two conventional cuts fail at opposite ends. An angular sector
+    is narrower than the beamstop near the origin, so it returns nothing
+    until it clears it. A fixed q_xy strip passes beside the beamstop
+    but is swallowed by the missing wedge as that widens. Joining them
+    works, but it costs a scale factor between two different angular
+    acceptances and a check that the two really are the same curve.
+
+    Neither is needed if the window is simply allowed to open. Hold its
+    inner edge at the beamstop's outer edge, where data begins, and let
+    the outer edge be whichever is wider: a fixed strip, or an angular
+    limit that grows with q.
+
+        |q_xy| from `inner` to max(`outer`, q_z * tan(`angle_deg`))
+
+    Near the origin that is the strip, passing beside the beamstop down
+    to q_z = 0. Further out it is the sector, wide enough to stay clear
+    of the missing wedge. It is one region, one average, no scale factor
+    and nothing to reconcile. On real frames it reproduced the joined
+    curve to 0.0002-0.0004 in fitted peak position over 0.038-2.15 1/A.
+
+    `as_qtotal` reports the abscissa as |q| rather than the bare q_z,
+    since the window sits at a non-zero q_xy offset; that puts its peaks
+    where an angular cut's are. The offset used is the mean |q_xy| of
+    the bins actually averaged in each row, so it follows the window as
+    it opens.
+
+    Returns (q, intensity) with rows that had no measured bin dropped.
+    """
+    I = np.asarray(intensity, dtype=float)
+    qx = np.asarray(qx, dtype=float)
+    qy = np.asarray(qy, dtype=float)
+    if not (outer > inner >= 0):
+        _raise_error(f"adaptive_cut: need outer > inner >= 0, got "
+                     f"inner={inner}, outer={outer}.")
+    t = np.tan(np.deg2rad(float(angle_deg)))
+    aqx = np.abs(qx)
+    qs, vs = [], []
+    for r in range(I.shape[0]):
+        qz = float(qy[r])
+        if qz <= 0:
+            continue
+        hi = max(outer, qz * t)
+        sel = (aqx >= inner) & (aqx <= hi)
+        if not sel.any():
+            continue
+        row = I[r, sel]
+        live = np.isfinite(row) & (row > 0)
+        if not live.any():
+            continue
+        if as_qtotal:
+            qs.append(float(np.hypot(qz, float(np.mean(aqx[sel][live])))))
+        else:
+            qs.append(qz)
+        vs.append(float(row[live].mean()))
+    if not qs:
+        _raise_error(
+            f"adaptive_cut: no measured bins anywhere in |q_xy| from {inner} "
+            f"outward. Check the inner edge against the beamstop's actual "
+            f"width, which the beamstop mask reports."
+        )
+    return np.asarray(qs), np.asarray(vs)
+
+
+def stitch_cuts(q_a, i_a, q_b, i_b, max_shape_scatter: float = 0.12,
+                 min_overlap_points: int = 20, primary: str = "low",
+                 blend_span: float = 0.3):
+    """Join two line cuts covering different q ranges into one curve.
+
+    In the out-of-plane direction neither cut spans the range and they
+    fail at opposite ends. An angular sector is narrower than the
+    beamstop near the origin, so it begins only once it clears it. A
+    fixed q_xy strip passes beside the beamstop but is swallowed by the
+    missing wedge as that widens. Between those two failures is a wide
+    band where both are measured, and that band is what makes a join
+    possible at all.
+
+    Which curve covers the low end and which the high end is worked out
+    from the data, not assumed, so the arguments may be given either way
+    round.
+
+    `primary` picks whose absolute scale the result carries -- "low" for
+    the curve reaching furthest down in q, "high" for the other. The
+    other is multiplied onto it. `blend_span` is the fraction of the
+    overlap, measured from its top, across which the two are crossfaded;
+    below that the primary is used alone. The default 0.3 with
+    primary="low" means the strip is used by itself over the lower 70%
+    of the overlap and only hands over near the end of its reach, which
+    is what "use the strip, and let the sector fill in what it cannot
+    reach" means in practice. Pass blend_span=1.0 to crossfade across
+    the whole overlap instead.
+
+    A scale factor alone proves nothing -- two curves can always be made
+    to agree at one point. What has to hold is that they have the same
+    SHAPE where they overlap, or joining them manufactures a feature. So
+    the scatter of their ratio about its median is measured, in dex, and
+    the join is refused past `max_shape_scatter`. On real data the two
+    out-of-plane cuts agreed to a scale factor of 0.95-0.97 with a
+    scatter of 0.046-0.076 dex.
+
+    Returns (q, intensity, report). `report` carries scale, overlap,
+    shape_scatter, n_overlap, primary and a message. On refusal q and
+    intensity are the primary curve unchanged, and the message says why.
+    """
+    q_a = np.asarray(q_a, dtype=float); i_a = np.asarray(i_a, dtype=float)
+    q_b = np.asarray(q_b, dtype=float); i_b = np.asarray(i_b, dtype=float)
+    base = {"scale": None, "overlap": None, "shape_scatter": None,
+            "n_overlap": 0, "primary": primary, "joined": False}
+
+    for arr in (q_a, i_a, q_b, i_b):
+        if arr.size < 2:
+            return q_a, i_a, dict(base, message="One cut is empty; nothing to join.")
+
+    # Orient by the data: which one reaches further down in q.
+    if float(q_a.min()) <= float(q_b.min()):
+        (q_lo_c, i_lo_c), (q_hi_c, i_hi_c) = (q_a, i_a), (q_b, i_b)
+    else:
+        (q_lo_c, i_lo_c), (q_hi_c, i_hi_c) = (q_b, i_b), (q_a, i_a)
+
+    lo = max(float(q_lo_c.min()), float(q_hi_c.min()))
+    hi = min(float(q_lo_c.max()), float(q_hi_c.max()))
+    fallback_q, fallback_i = ((q_lo_c, i_lo_c) if primary == "low"
+                              else (q_hi_c, i_hi_c))
+    if not (hi > lo * 1.02):
+        return fallback_q, fallback_i, dict(
+            base, message=(
+                f"The two cuts do not overlap (one covers {q_lo_c.min():.3f}-"
+                f"{q_lo_c.max():.3f}, the other {q_hi_c.min():.3f}-"
+                f"{q_hi_c.max():.3f} 1/A), so there is nothing to put them on a "
+                f"common scale with. Widen the strip or the sector until they do."))
+
+    grid = np.geomspace(lo * 1.02, hi * 0.98, 200)
+    a = np.interp(grid, q_lo_c, i_lo_c)
+    b = np.interp(grid, q_hi_c, i_hi_c)
+    good = np.isfinite(a) & np.isfinite(b) & (a > 0) & (b > 0)
+    if int(good.sum()) < min_overlap_points:
+        return fallback_q, fallback_i, dict(
+            base, n_overlap=int(good.sum()), overlap=(lo, hi),
+            message=(f"Only {int(good.sum())} usable points in the overlap "
+                     f"{lo:.3f}-{hi:.3f} 1/A, too few to fix a scale factor."))
+
+    ratio = a[good] / b[good]                      # low-curve / high-curve
+    scale = float(np.median(ratio))
+    scatter = float(np.std(np.log10(ratio / scale)))
+    base.update(scale=scale, overlap=(lo, hi), shape_scatter=scatter,
+                n_overlap=int(good.sum()))
+    if scatter > max_shape_scatter:
+        return fallback_q, fallback_i, dict(
+            base, message=(
+                f"Refusing to join: across the overlap {lo:.3f}-{hi:.3f} 1/A "
+                f"the two cuts differ in SHAPE, not just scale (ratio scatter "
+                f"{scatter:.3f} dex against a limit of {max_shape_scatter:.3f}). "
+                f"A single scale factor would not make them one curve, so "
+                f"joining them would manufacture a feature. They are probably "
+                f"not sampling the same scattering -- check the 2D map."))
+
+    if primary == "low":
+        i_lo_use, i_hi_use, applied = i_lo_c, i_hi_c * scale, scale
+    else:
+        i_lo_use, i_hi_use, applied = i_lo_c / scale, i_hi_c, 1.0 / scale
+
+    q_all = np.unique(np.concatenate([q_lo_c, q_hi_c]))
+    lo_i = np.interp(q_all, q_lo_c, i_lo_use, left=np.nan, right=np.nan)
+    hi_i = np.interp(q_all, q_hi_c, i_hi_use, left=np.nan, right=np.nan)
+
+    # Crossfade only across the top `blend_span` of the overlap, so the
+    # primary is used alone for as much of its own reach as possible.
+    span = float(np.clip(blend_span, 1e-3, 1.0))
+    l10lo, l10hi = np.log10(lo), np.log10(hi)
+    if primary == "low":
+        start = l10hi - span * (l10hi - l10lo)     # hand over near the top
+    else:
+        start = l10lo
+        l10hi = l10lo + span * (np.log10(hi) - l10lo)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        w = (np.log10(q_all) - start) / max(l10hi - start, 1e-9)
+    w = np.clip(w, 0.0, 1.0)                       # 0 = low curve, 1 = high
+    out = np.where(np.isnan(lo_i), hi_i,
+                   np.where(np.isnan(hi_i), lo_i, (1 - w) * lo_i + w * hi_i))
+    keep = np.isfinite(out) & (out > 0)
+    verdict = "clean" if scatter < 0.05 else "acceptable"
+    who = ("the low-q cut" if primary == "low" else "the high-q cut")
+    return q_all[keep], out[keep], dict(
+        base, joined=True,
+        message=(f"Joined over {lo:.3f}-{hi:.3f} 1/A from {int(good.sum())} "
+                 f"shared points, keeping {who}'s scale; the other was "
+                 f"multiplied by {applied:.3f}. Shape agreement {scatter:.3f} "
+                 f"dex ({verdict}). The primary is used alone up to "
+                 f"q = {10**start:.3f} 1/A and crossfaded to the other by "
+                 f"{hi:.3f}."))
+
 def box_cut_report(intensity, qx, qy, along: str = "qz",
                     across_range=(0.025, 0.05)):
     """Say where a box cut's data stops, and why.
@@ -2395,6 +2770,19 @@ def box_cut(intensity, qx, qy, along: str = "qz",
     from 0.074 to 0.067 and (003) from 0.075 to 0.071 -- where widening
     the wedge to +-20 deg instead blew (002) out to 0.101.
 
+    This reads the already-remapped map, so it inherits whatever mask
+    that map was built with -- which, for the 2D image, leaves the
+    detector's module gaps unmasked so the picture stays continuous.
+    That was worth checking rather than assuming, and it turns out not
+    to matter: against the same cut taken from a properly masked map,
+    the worst local deviation near a gap moved by 0.001-0.005 on real
+    frames, and in both cases it sat at q = 0.53, a real feature, not at
+    the gap. The remapping spreads each detector row across a little
+    range of q_z depending on q_xy, so a gap's deficit is smeared rather
+    than landing on one bin the way it does in an angular sector. Paying
+    a second integrate2d per file to close a 0.5% effect is not worth
+    it, but do not assume the same of any other map-derived quantity.
+
     along:  "qz" for an out-of-plane profile from a q_xy strip,
             "qxy" for an in-plane profile from a q_z strip.
     across_range:  (lo, hi) on the OTHER axis, as |q|, so a q_xy strip
@@ -2448,34 +2836,53 @@ def box_cut(intensity, qx, qy, along: str = "qz",
     return q_out, prof[keep]
 
 
-def linecut_drop_empty_bins(result):
-    """Return (q, intensity) with bins no pixel ever reached removed.
+def linecut_drop_empty_bins(result, min_count_fraction: float = 0.5):
+    """Drop bins that no pixel reached, and bins that most pixels missed.
 
     pyFAI reports an empty bin as intensity 0. That is a different claim
-    from "nothing was measured here": on a log axis it plunges to the
-    floor and rules a spike through the plot, in a .txt file it is
-    indistinguishable from a real zero reading, and a peak fit will
-    happily try to pass through it.
+    from "nothing was measured here": on a log axis it rules a spike
+    through the plot, in a saved .txt it cannot be told from a real zero
+    reading, and a peak fit will happily try to pass through it.
 
-    Empty bins are not rare in a narrow sector: a detector module gap can
-    take every pixel that would have fed a bin. The result object carries
-    the per-bin pixel count, so use that rather than inferring emptiness
-    from the value, which would also discard any genuine zero.
+    A PARTLY filled bin is the subtler and more damaging case. Where a
+    line cut crosses a detector module gap, the bins at the gap's edges
+    keep a handful of pixels and are reported as ordinary points -- but
+    those survivors all sit at one extreme of the sector, not spread
+    across it, so their mean is biased. They come out low, and a fit
+    spanning the gap chases them. The gap is then not a clean hole in
+    the curve but a pair of false points pulling the peak down.
+
+    So a bin is also dropped when its pixel count falls below
+    `min_count_fraction` of the local median count. That leaves a clean
+    gap, which a fit can span without being dragged, instead of two
+    plausible-looking wrong points. Set the fraction to 0 to keep every
+    non-empty bin.
 
     Accepts a pyFAI result object or a plain (q, intensity) pair.
     """
     q = np.asarray(result[0], dtype=float)
     intensity = np.asarray(result[1], dtype=float)
     count = getattr(result, "count", None)
-    if count is not None:
-        keep = np.asarray(count, dtype=float) > 0
-    else:
+    if count is None:
         # Older pyFAI with no count array: an exact 0.0 after averaging is
-        # overwhelmingly an empty bin rather than a measured zero.
+        # overwhelmingly an empty bin rather than a measured zero, and
+        # partial bins cannot be detected at all.
         keep = intensity != 0.0
+    else:
+        c = np.asarray(count, dtype=float)
+        keep = c > 0
+        if min_count_fraction > 0 and keep.any():
+            # Local median count, over a window wide enough to span a gap
+            # without tracking the slow fall-off in solid angle.
+            w = max(21, int(0.05 * c.size) | 1)
+            half = w // 2
+            padded = np.pad(c, half, mode="edge")
+            local = np.array([np.median(padded[j:j + w]) for j in range(c.size)])
+            with np.errstate(invalid="ignore", divide="ignore"):
+                frac = np.where(local > 0, c / local, 1.0)
+            keep &= frac >= min_count_fraction
     keep &= np.isfinite(q) & np.isfinite(intensity)
     return q[keep], intensity[keep]
-
 
 def combine_masks(*masks, detector=None, shape=None):
     """OR together any masks that are present (None entries skipped).

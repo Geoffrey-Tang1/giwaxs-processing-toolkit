@@ -5,6 +5,7 @@ fabio
 scipy
 streamlit
 pandas
+openpyxl
 anthropic
 openai
 google-genai

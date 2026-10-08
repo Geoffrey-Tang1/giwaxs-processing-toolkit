@@ -194,6 +194,31 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                          "quarters of the peak intensity an oriented reflection "
                          "puts on the axis. Wider strips drift off the peak -- "
                          "0.03,0.12 kept only 13-38%% of it on real data.")
+    p.add_argument("--stitch-oop", action="store_true",
+                    help="Also write ONE out-of-plane profile covering the "
+                         "whole q range, by joining each --box-cut strip to "
+                         "the (-8, 8) deg sector. Neither covers it alone and "
+                         "they fail at opposite ends -- the sector is narrower "
+                         "than the beamstop near the origin, the strip is "
+                         "swallowed by the missing wedge further out -- but "
+                         "they overlap widely in between. The strip is put on "
+                         "the sector's scale using the median ratio over that "
+                         "overlap and crossfaded across it. The join is "
+                         "REFUSED if the two differ in shape there rather than "
+                         "only in scale, since a scale factor would then be "
+                         "manufacturing a feature. Requires --box-cut.")
+    p.add_argument("--box-cut-inplane", type=gc.parse_range, action="append", default=None,
+                    dest="box_cuts_ip", metavar="QZ_LO,QZ_HI",
+                    help="Add an IN-plane profile along q_xy taken from a fixed "
+                         "q_z strip. Repeat for more strips. Use this when the "
+                         "in-plane reflections are rods standing up from the "
+                         "horizon: the chi -90..-80 sector drifts away from the "
+                         "horizon as q grows -- at q = 0.74 its far edge is "
+                         "already at q_z = 0.13 -- so it integrates along the "
+                         "rod and lifts the background, while a strip hugs the "
+                         "horizon at every q. On real data that moved the (300) "
+                         "fit from R2 = 0.61 to 0.93. Start with "
+                         "--box-cut-inplane 0.03,0.09.")
     p.add_argument("--fit-region", type=gc.parse_fit_region, action="append", default=None,
                     dest="fit_regions", metavar="QMIN:QMAX[:LABEL]",
                     help="Fit a diffraction peak within this q window (inverse "
@@ -322,17 +347,24 @@ def process_file(tiff_path: str, fi, get_unit_fiber, mask, args, out_dirs, fabio
         if bs.any():
             print(f"  Beamstop masked: {int(bs.sum())} px "
                   f"({100 * bs.mean():.2f}% of the detector)")
-    # Always through combine_masks with the detector: handing pyFAI any
-    # explicit mask replaces its detector mask rather than adding to it.
-    file_mask = gc.combine_masks(
+    # Two masks, because the picture and the numbers want different things.
+    # A module gap left unmasked averages in as zero intensity, which is a
+    # quantitative error in a line cut but only a cosmetic one in the image
+    # -- and masking it there rules the map with black bands. pyFAI is
+    # called separately for the two, so they need not agree.
+    # (Always through combine_masks with the detector where wanted: handing
+    # pyFAI any explicit mask REPLACES its detector mask rather than adding
+    # to it.)
+    image_mask = gc.combine_masks(
         mask, bs, detector=fi.detector if args.mask_detector_gaps else None)
+    cut_mask = gc.combine_masks(mask, bs, detector=fi.detector)
 
     # --- 2D remap into (q_ip, q_oop) space ------------------------------------
     res2d = fi.integrate2d_grazing_incidence(
         img_data,
         npt_ip=args.npt, npt_oop=args.npt,
         unit_ip=unit_gi_ip, unit_oop=unit_gi_oop,
-        mask=file_mask,
+        mask=image_mask,
     )
     res_I, res_qx, res_qy = res2d[0:3]
     res_qx = -np.flip(res_qx)
@@ -366,6 +398,7 @@ def process_file(tiff_path: str, fi, get_unit_fiber, mask, args, out_dirs, fabio
 
     # --- 1D line cuts ------------------------------------------------------
     incident_angle_rad = np.deg2rad(incident_angle_deg)
+    oop_sector = None
 
     for angles in all_ranges:
         res1d = fi.integrate1d_grazing_incidence(
@@ -374,9 +407,11 @@ def process_file(tiff_path: str, fi, get_unit_fiber, mask, args, out_dirs, fabio
             unit_ip=unit_gi_chi, unit_oop=unit_gi_qtot,
             npt_oop=args.npt, npt_ip=args.npt,
             ip_range=angles,
-            mask=file_mask,
+            mask=cut_mask,
         )
         q, intensity = gc.linecut_drop_empty_bins(res1d)
+        if tuple(angles) == (-8, 8):
+            oop_sector = (q, intensity)
 
         tag = f"{angles[0]}_to_{angles[1]}_deg".replace("-", "m")
         data_out_path = os.path.join(out_dirs["linecuts"], f"{base}_lineprofile_{tag}.txt")
@@ -491,6 +526,131 @@ def process_file(tiff_path: str, fi, get_unit_fiber, mask, args, out_dirs, fabio
         print(f"  Saved box cut q_xy {qxy_lo:g}-{qxy_hi:g} -> {data_out_path}")
         _qstop, _why, _msg = gc.box_cut_report(
             res_I, res_qx, res_qy, along="qz", across_range=(qxy_lo, qxy_hi))
+        if _why in ("missing_wedge", "empty"):
+            print(f"    NOTE: {_msg}")
+
+        if args.stitch_oop and oop_sector is not None:
+            # One region rather than two cuts reconciled: the window's inner
+            # edge stays at the beamstop while its outer edge opens with q,
+            # so there is no scale factor between differing acceptances and
+            # nothing to check agreement on.
+            try:
+                sq, si = gc.adaptive_cut(res_I, res_qx, res_qy,
+                                          inner=qxy_lo, outer=qxy_hi,
+                                          angle_deg=8.0)
+                rep = {"joined": True, "overlap": None, "scale": None,
+                       "shape_scatter": None, "n_overlap": 0,
+                       "primary": "adaptive window",
+                       "message": (
+                           f"One adaptive window: |q_xy| from {qxy_lo:g} out to "
+                           f"max({qxy_hi:g}, q_z*tan 8 deg). No join, so no "
+                           f"scale factor and nothing to reconcile.")}
+            except gc.GiwaxsError as exc:
+                rep = {"joined": False, "overlap": None, "scale": None,
+                       "shape_scatter": None, "n_overlap": 0,
+                       "primary": "adaptive window", "message": str(exc)}
+                sq = si = None
+            if rep["joined"]:
+                stag = f"oop_combined_qxy_{qxy_lo:g}_to_{qxy_hi:g}".replace(".", "p")
+                slabel = (f"combined out-of-plane (sector + strip "
+                          f"{qxy_lo:g}-{qxy_hi:g})")
+                spath = os.path.join(out_dirs["linecuts"],
+                                      f"{base}_lineprofile_{stag}.txt")
+                np.savetxt(spath, np.c_[sq, si], header="Q(1/A)\tIntensity(a.u.)")
+                gc.plot_1d_linecut(sq, si, os.path.join(
+                    out_dirs["linecuts"], f"{base}_lineprofile_{stag}.png"),
+                    (qxy_lo, qxy_hi), title=f"{base}: {slabel}",
+                    line_color=args.line_color, font_family=args.font_family,
+                    font_size=args.font_size, dpi=args.dpi,
+                    q_range=args.linecut_q_range,
+                    tick_spacing=args.linecut_tick_spacing,
+                    subtick_spacing=args.linecut_subtick_spacing)
+                diag_path = os.path.join(
+                    out_dirs["linecuts"], f"{base}_lineprofile_{stag}_sources.png")
+                gc.plot_stitch_diagnostic(
+                    q, intensity, oop_sector[0], oop_sector[1], sq, si, rep,
+                    switch_q=qxy_hi / np.tan(np.deg2rad(8.0)),
+                    out_path=diag_path,
+                    title=f"{base}: box cut vs angular sector (out-of-plane)",
+                    font_family=args.font_family, font_size=args.font_size,
+                    dpi=args.dpi)
+                print(f"  Saved combined out-of-plane profile "
+                      f"({sq.min():.3f}-{sq.max():.3f} 1/A) -> {spath}")
+                print(f"  Saved the companion two-cut comparison -> {diag_path}")
+                xlsx_path = os.path.join(
+                    out_dirs["linecuts"], f"{base}_lineprofile_{stag}.xlsx")
+                try:
+                    gc.write_linecut_workbook(
+                        xlsx_path, combined=(sq, si),
+                        sources={"box cut (strip)": (q, intensity),
+                                 "angular sector": (oop_sector[0], oop_sector[1])},
+                        report=rep, source_file=os.path.basename(tiff_path))
+                    print(f"  Saved the workbook -> {xlsx_path}")
+                except gc.GiwaxsError as exc:
+                    print(f"  No .xlsx written: {exc}")
+                print(f"    {rep['message']}")
+                if args.fit_regions:
+                    fit_peaks_for_linecut(
+                        sq, si, args, base, stag, sector_label=slabel,
+                        out_dirs=out_dirs,
+                        fit_rows=fit_rows if fit_rows is not None else [])
+            else:
+                print(f"  Combined out-of-plane profile NOT written. "
+                      f"{rep['message']}")
+
+        if args.fit_regions:
+            fit_peaks_for_linecut(
+                q, intensity, args, base, tag, sector_label=label,
+                out_dirs=out_dirs, fit_rows=fit_rows if fit_rows is not None else [],
+            )
+
+    # --- In-plane box cuts: a profile along q_xy from a fixed q_z strip ----
+    for qz_lo, qz_hi in (args.box_cuts_ip or []):
+        q, intensity = gc.box_cut(res_I, res_qx, res_qy, along="qxy",
+                                   across_range=(qz_lo, qz_hi))
+        tag = f"boxcut_ip_qz_{qz_lo:g}_to_{qz_hi:g}".replace(".", "p")
+        label = f"in-plane box cut, q_z {qz_lo:g}-{qz_hi:g} 1/A"
+
+        data_out_path = os.path.join(out_dirs["linecuts"], f"{base}_lineprofile_{tag}.txt")
+        np.savetxt(data_out_path, np.c_[q, intensity], header="Q(1/A)\tIntensity(a.u.)")
+
+        plot_out_path = os.path.join(out_dirs["linecuts"], f"{base}_lineprofile_{tag}.png")
+        gc.plot_1d_linecut(q, intensity, plot_out_path, (qz_lo, qz_hi),
+                            title=f"{base}: {label}",
+                            line_color=args.line_color, font_family=args.font_family,
+                            font_size=args.font_size, dpi=args.dpi,
+                            q_range=args.linecut_q_range,
+                            tick_spacing=args.linecut_tick_spacing,
+                            subtick_spacing=args.linecut_subtick_spacing)
+
+        overlay_path = os.path.join(out_dirs["images"], f"{base}_sector_{tag}.png")
+        xlabel, ylabel = gc.AXIS_LABELS.get(args.axis_labels, gc.AXIS_LABELS["ip_oop"])
+        with gc.style_context(args.font_family, args.font_size):
+            fig, ax = plt.subplots(figsize=gc.DEFAULT_FIGSIZE)
+            v_lo, v_hi = gc.resolve_vmin_vmax(res_I, args.vmin_percentile, args.vmin,
+                                               args.vmax, args.vmax_percentile,
+                                               color_scale=args.color_scale)
+            norm = (LogNorm(vmin=v_lo, vmax=v_hi) if args.color_scale == "log"
+                     else Normalize(vmin=v_lo, vmax=v_hi))
+            ax.pcolormesh(res_qx, res_qy, res_I, norm=norm, cmap=args.cmap)
+            ax.set_facecolor("black")
+            ax.set_aspect("equal")
+            ax.set_xlim(args.qip_plot_range)
+            ax.set_ylim(args.qoop_plot_range)
+            for sign in (-1.0, 1.0):
+                ax.axhspan(sign * qz_lo, sign * qz_hi,
+                           color=args.sector_line_color, alpha=0.30, lw=0)
+            ax.tick_params(axis="both", which="both", direction="in")
+            ax.set_xlabel(xlabel)
+            ax.set_ylabel(ylabel)
+            fig.suptitle(f"{base}: {label}")
+            fig.tight_layout()
+            fig.savefig(overlay_path, dpi=args.dpi)
+            plt.close(fig)
+
+        print(f"  Saved in-plane box cut q_z {qz_lo:g}-{qz_hi:g} -> {data_out_path}")
+        _qstop, _why, _msg = gc.box_cut_report(
+            res_I, res_qx, res_qy, along="qxy", across_range=(qz_lo, qz_hi))
         if _why in ("missing_wedge", "empty"):
             print(f"    NOTE: {_msg}")
 

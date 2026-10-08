@@ -133,6 +133,12 @@ st.session_state.setdefault("mask_detector_gaps", False)
 st.session_state.setdefault("use_box_cut", False)
 st.session_state.setdefault("box_qxy_lo", 0.025)
 st.session_state.setdefault("box_qxy_hi", 0.050)
+st.session_state.setdefault("stitch_oop", False)
+st.session_state.setdefault("_stitch_diag", None)
+st.session_state.setdefault("_oop_books", [])
+st.session_state.setdefault("use_box_cut_ip", False)
+st.session_state.setdefault("box_qz_lo", 0.03)
+st.session_state.setdefault("box_qz_hi", 0.09)
 st.session_state.setdefault("measured_centre", None)
 st.session_state.setdefault("calibration_confirmed", False)
 st.session_state.setdefault("calibration_diagnostic_path", None)
@@ -1524,6 +1530,50 @@ with tab_2d:
         if box_qxy_hi <= box_qxy_lo:
             st.warning("The upper q_xy must exceed the lower one; the box cut "
                        "will be skipped.")
+        stitch_oop = st.checkbox(
+            "Emit ONE combined out-of-plane profile covering the whole q range",
+            key="stitch_oop",
+            help="Joins the strip above to the chi −8…8 sector so a single "
+                 "curve covers the whole q range. Neither covers it alone and "
+                 "they fail at opposite ends — the sector is narrower than the "
+                 "beamstop near the origin, the strip is swallowed by the "
+                 "missing wedge further out — but they overlap widely in "
+                 "between. The strip is put on the sector's scale from the "
+                 "median ratio over that overlap and crossfaded across it. "
+                 "The join is REFUSED if the two differ in shape there rather "
+                 "than only in scale. You do not need the strip itself ticked "
+                 "above — this computes the one it needs, using the bounds "
+                 "above. Tick the strip as well only if you also want it as a "
+                 "separate curve.")
+
+        st.divider()
+        st.caption(
+            "**In-plane direction.** The mirror case: a profile along q_xy "
+            "from a fixed q_z strip. Use it when the in-plane reflections are "
+            "rods standing up from the horizon — the chi −90…−80 sector drifts "
+            "away from the horizon as q grows (at q = 0.74 its far edge is "
+            "already at q_z = 0.13), so it integrates along the rod and lifts "
+            "the background. A strip hugs the horizon at every q. On real data "
+            "that moved a (300) fit from R² = 0.61 to 0.93."
+        )
+        use_box_cut_ip = st.checkbox("Add an in-plane box cut to every file",
+                                      key="use_box_cut_ip")
+        bz1, bz2 = st.columns(2)
+        with bz1:
+            box_qz_lo = st.number_input(
+                "q_z from (1/Å)", min_value=0.0, max_value=2.0, step=0.005,
+                format="%.3f", key="box_qz_lo",
+                help="Start above the horizon itself, which carries the "
+                     "specular and Yoneda lines rather than sample structure.")
+        with bz2:
+            box_qz_hi = st.number_input(
+                "q_z to (1/Å)", min_value=0.0, max_value=2.0, step=0.005,
+                format="%.3f", key="box_qz_hi",
+                help="Tall enough to collect the rod, low enough not to drift "
+                     "off it. 0.03–0.09 worked on real data.")
+        if box_qz_hi <= box_qz_lo:
+            st.warning("The upper q_z must exceed the lower one; the in-plane "
+                       "box cut will be skipped.")
 
     # ---- Auto-define the beam centre from the data itself ---------------
     # A calibrant pins the COLUMN well and leaves the ROW nearly free (the
@@ -1617,6 +1667,7 @@ with tab_2d:
             st.error(f"Geometry error: {err}")
         else:
             results = []
+            _books = []
             row_warning = ""
             progress_bar = st.progress(0.0)
             status_text = st.empty()
@@ -1640,12 +1691,16 @@ with tab_2d:
                                 f"({100 * _bs.mean():.2f}% of the detector). "
                                 f"Its shadow runs up the beam column, through "
                                 f"the out-of-plane sector.")
-                    # Always through combine_masks with the detector: handing
-                    # pyFAI any explicit mask replaces its detector mask
-                    # rather than adding to it.
-                    mask = gc.combine_masks(
+                    # Two masks: a module gap left unmasked averages in as
+                    # zero intensity, a quantitative error in a line cut but
+                    # only a cosmetic one in the image -- and masking it there
+                    # rules the map with black bands. pyFAI is called
+                    # separately for the two, so they need not agree.
+                    image_mask = gc.combine_masks(
                         mask, _bs,
                         detector=fi.detector if mask_detector_gaps else None)
+                    cut_mask = gc.combine_masks(mask, _bs,
+                                                 detector=fi.detector)
 
                     (unit_ip, unit_oop, unit_chi, unit_qtot), angle_deg = units_for_file(
                         get_unit_fiber, uf.name, verbose=False
@@ -1666,7 +1721,7 @@ with tab_2d:
 
                     res2d = fi.integrate2d_grazing_incidence(
                         img, npt_ip=int(npt), npt_oop=int(npt),
-                        unit_ip=unit_ip, unit_oop=unit_oop, mask=mask,
+                        unit_ip=unit_ip, unit_oop=unit_oop, mask=image_mask,
                     )
                     res_I, res_qx, res_qy = res2d[0:3]
                     res_qx = -np.flip(res_qx)
@@ -1690,7 +1745,7 @@ with tab_2d:
                             data=img, incident_angle=incident_angle_rad,
                             unit_ip=unit_chi, unit_oop=unit_qtot,
                             npt_oop=int(npt), npt_ip=int(npt),
-                            ip_range=angles, mask=mask,
+                            ip_range=angles, mask=cut_mask,
                         )
                         q, intensity = gc.linecut_drop_empty_bins(_res1d)
                         linecuts.append((angles, q, intensity,
@@ -1700,23 +1755,106 @@ with tab_2d:
                     # narrower than the beamstop and returns nothing until it
                     # clears it. A fixed q_xy strip passes beside the stop all
                     # the way down, which is what a low-q lamellar order needs.
-                    if use_box_cut:
+                    if use_box_cut or stitch_oop:
                         try:
                             bq, bI = gc.box_cut(
                                 res_I, res_qx, res_qy, along="qz",
                                 across_range=(box_qxy_lo, box_qxy_hi))
-                            linecuts.append((
-                                (box_qxy_lo, box_qxy_hi), bq, bI,
-                                f"box cut q_xy {box_qxy_lo:g}-{box_qxy_hi:g}"))
-                            if i == 0:
-                                _qs, _why, _m = gc.box_cut_report(
-                                    res_I, res_qx, res_qy, along="qz",
-                                    across_range=(box_qxy_lo, box_qxy_hi))
-                                if _why in ("missing_wedge", "empty"):
-                                    st.info(f"**Box cut range.** {_m}")
+                            if use_box_cut:
+                                linecuts.append((
+                                    (box_qxy_lo, box_qxy_hi), bq, bI,
+                                    f"box cut q_xy {box_qxy_lo:g}-{box_qxy_hi:g}"))
+                                if i == 0:
+                                    _qs, _why, _m = gc.box_cut_report(
+                                        res_I, res_qx, res_qy, along="qz",
+                                        across_range=(box_qxy_lo, box_qxy_hi))
+                                    if _why in ("missing_wedge", "empty"):
+                                        st.info(f"**Box cut range.** {_m}")
+                            if stitch_oop:
+                                _oop = next((c for c in linecuts
+                                             if c[3] == "(-8, 8) deg"), None)
+                                if _oop is not None:
+                                    try:
+                                        sq, si = gc.adaptive_cut(
+                                            res_I, res_qx, res_qy,
+                                            inner=box_qxy_lo, outer=box_qxy_hi,
+                                            angle_deg=8.0)
+                                        _rep = {
+                                            "joined": True, "overlap": None,
+                                            "scale": None, "shape_scatter": None,
+                                            "n_overlap": 0,
+                                            "primary": "adaptive window",
+                                            "message": (
+                                                f"One adaptive window: |q_xy| "
+                                                f"from {box_qxy_lo:g} out to "
+                                                f"max({box_qxy_hi:g}, "
+                                                f"q_z·tan 8°). No join, so no "
+                                                f"scale factor and nothing to "
+                                                f"reconcile.")}
+                                    except gc.GiwaxsError as _e:
+                                        sq = si = None
+                                        _rep = {"joined": False, "overlap": None,
+                                                "scale": None,
+                                                "shape_scatter": None,
+                                                "n_overlap": 0,
+                                                "primary": "adaptive window",
+                                                "message": str(_e)}
+                                    if _rep["joined"]:
+                                        linecuts.append((
+                                            (box_qxy_lo, box_qxy_hi), sq, si,
+                                            "combined out-of-plane"))
+                                        _xp = os.path.join(
+                                            _upload_scratch_dir(),
+                                            f"{os.path.splitext(uf.name)[0]}"
+                                            f"_oop_combined.xlsx")
+                                        try:
+                                            gc.write_linecut_workbook(
+                                                _xp, combined=(sq, si),
+                                                sources={
+                                                    "box cut (strip)": (bq, bI),
+                                                    "angular sector":
+                                                        (_oop[1], _oop[2])},
+                                                report=_rep,
+                                                source_file=uf.name)
+                                            _books.append((uf.name, _xp))
+                                        except gc.GiwaxsError as _exc:
+                                            if i == 0:
+                                                st.warning(f"No .xlsx: {_exc}")
+                                        if i == 0:
+                                            st.session_state["_stitch_diag"] = (
+                                                bq, bI, _oop[1], _oop[2],
+                                                sq, si, _rep, uf.name)
+                                        if i == 0:
+                                            st.success(
+                                                f"**Combined out-of-plane "
+                                                f"profile** "
+                                                f"({sq.min():.3f}–{sq.max():.3f} "
+                                                f"1/Å). {_rep['message']}")
+                                    elif i == 0:
+                                        st.warning(
+                                            f"**No combined profile.** "
+                                            f"{_rep['message']}")
                         except Exception as exc:
                             if i == 0:
                                 st.warning(f"Box cut skipped: {exc}")
+
+                    if use_box_cut_ip:
+                        try:
+                            bq, bI = gc.box_cut(
+                                res_I, res_qx, res_qy, along="qxy",
+                                across_range=(box_qz_lo, box_qz_hi))
+                            linecuts.append((
+                                (box_qz_lo, box_qz_hi), bq, bI,
+                                f"in-plane box cut q_z {box_qz_lo:g}-{box_qz_hi:g}"))
+                            if i == 0:
+                                _qs, _why, _m = gc.box_cut_report(
+                                    res_I, res_qx, res_qy, along="qxy",
+                                    across_range=(box_qz_lo, box_qz_hi))
+                                if _why in ("missing_wedge", "empty"):
+                                    st.info(f"**In-plane box cut range.** {_m}")
+                        except Exception as exc:
+                            if i == 0:
+                                st.warning(f"In-plane box cut skipped: {exc}")
 
                     results.append({
                         "name": os.path.splitext(uf.name)[0],
@@ -1751,6 +1889,27 @@ with tab_2d:
                     st.warning(f"**Check the geometry.** {_msg}")
                 if row_warning:
                     st.warning(f"**Check the beam-centre row.** {row_warning}")
+            if _books:
+                st.session_state["_oop_books"] = _books
+            _sd = st.session_state.pop("_stitch_diag", None)
+            if _sd is not None:
+                _bq, _bI, _sqq, _sii, _cq, _ci, _crep, _nm = _sd
+                st.pyplot(gc.plot_stitch_diagnostic(
+                    _bq, _bI, _sqq, _sii, _cq, _ci, _crep,
+                    title=f"{_nm}: box cut vs angular sector (out-of-plane)",
+                    font_family=st.session_state["2d_font_family"],
+                    font_size=st.session_state["2d_font_size"]))
+
+            for _nm2, _xp2 in st.session_state.get("_oop_books", []):
+                with open(_xp2, "rb") as _fh:
+                    st.download_button(
+                        f"⬇️ Combined out-of-plane workbook — {_nm2} (.xlsx)",
+                        _fh.read(),
+                        file_name=os.path.basename(_xp2),
+                        mime=("application/vnd.openxmlformats-officedocument."
+                              "spreadsheetml.sheet"),
+                        key=f"dl_oopbook_{_nm2}")
+
             st.session_state["processed_2d"] = results
             st.session_state["_2d_zip_path"] = None  # invalidate any stale cached zip
             st.session_state["_2d_plot_png_cache"] = {}  # invalidate any stale cached images
