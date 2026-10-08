@@ -123,6 +123,10 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                          f"{', '.join(gc.COMMON_FONTS)}.")
     p.add_argument("--font-size", type=float, default=None,
                     help="Base font size (points) for all plot text.")
+    p.add_argument("--no-colorbar", dest="show_colorbar", action="store_false",
+                    help="Leave the intensity colour bar off the saved image. "
+                         "Useful when the figure will carry its scale "
+                         "elsewhere, or for a bare panel.")
     p.add_argument("--dpi", type=int, default=400,
                     help="Resolution (dots per inch) for saved PNG files.")
     p.add_argument("--axis-labels", choices=["ip_oop", "xyz"], default="xyz",
@@ -289,7 +293,7 @@ def process_file(tiff_path: str, fi, get_unit_fiber, mask, args, out_dirs, fabio
         font_family=args.font_family, font_size=args.font_size,
         dpi=args.dpi, axis_label_style=args.axis_labels,
         tick_spacing=args.tick_spacing, subtick_spacing=args.subtick_spacing,
-        color_scale=args.color_scale,
+        color_scale=args.color_scale, show_colorbar=args.show_colorbar,
     )
     print(f"  Saved 2D image: {img_out_path}")
 
@@ -322,7 +326,13 @@ def process_file(tiff_path: str, fi, get_unit_fiber, mask, args, out_dirs, fabio
         overlay_path = os.path.join(out_dirs["images"], f"{base}_sector_{tag}.png")
         xlabel, ylabel = gc.AXIS_LABELS.get(args.axis_labels, gc.AXIS_LABELS["ip_oop"])
         with gc.style_context(args.font_family, args.font_size):
-            fig, ax = plt.subplots(1, 2, width_ratios=[1, 0.05], figsize=gc.DEFAULT_FIGSIZE)
+            if args.show_colorbar:
+                fig, _axes = plt.subplots(1, 2, width_ratios=[1, 0.05],
+                                           figsize=gc.DEFAULT_FIGSIZE)
+                ax = [_axes[0], _axes[1]]
+            else:
+                _a = plt.figure(figsize=gc.DEFAULT_FIGSIZE).add_subplot(111)
+                fig, ax = _a.figure, [_a, None]
             v_lo, v_hi = gc.resolve_vmin_vmax(res_I, args.vmin_percentile, args.vmin, args.vmax,
                                                args.vmax_percentile, color_scale=args.color_scale)
             sector_norm = (LogNorm(vmin=v_lo, vmax=v_hi) if args.color_scale == "log"
@@ -343,8 +353,9 @@ def process_file(tiff_path: str, fi, get_unit_fiber, mask, args, out_dirs, fabio
             ax[0].set_xlabel(xlabel)
             ax[0].set_ylabel(ylabel)
             gc.add_angle_lines(ax[0], res_qx, res_qy, angles, color=args.sector_line_color)
-            cbar = fig.colorbar(mesh, cax=ax[1], orientation="vertical")
-            cbar.ax.tick_params(which="both", direction="in")
+            if args.show_colorbar:
+                cbar = fig.colorbar(mesh, cax=ax[1], orientation="vertical")
+                cbar.ax.tick_params(which="both", direction="in")
             fig.suptitle(f"{base}: sector {angles} deg")
             fig.tight_layout()
             fig.savefig(overlay_path, dpi=args.dpi)

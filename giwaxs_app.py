@@ -73,7 +73,9 @@ for prefix in ("2d_", "pf_"):
 st.session_state.setdefault("2d_tick_spacing", 0.5)            # 2D image, 1/A
 st.session_state.setdefault("2d_linecut_tick_spacing", 0.3)    # line cuts, 1/A
 st.session_state.setdefault("2d_subtick_spacing", 0.0)         # 2D image minor ticks, 1/A -- 0 = off
-st.session_state.setdefault("2d_color_scale", "log")           # 2D image colorbar mapping
+st.session_state.setdefault("2d_color_scale", "log")
+st.session_state.setdefault("2d_show_colorbar", True)
+st.session_state.setdefault("pf_show_colorbar", True)           # 2D image colorbar mapping
 st.session_state.setdefault("pf_tick_spacing", 20.0)           # pole figure chi axis, deg
 st.session_state.setdefault("processed_2d", None)   # cached heavy-computation results
 st.session_state.setdefault("processed_pf", None)
@@ -566,6 +568,7 @@ def build_2d_results_zip(qip_range, qoop_range) -> bytes:
                 tick_spacing=st.session_state["2d_tick_spacing"],
                 subtick_spacing=st.session_state["2d_subtick_spacing"] or None,
                 color_scale=st.session_state["2d_color_scale"],
+                show_colorbar=st.session_state["2d_show_colorbar"],
                 edge_label_top=st.session_state["2d_edge_top"] or None,
                 edge_label_bottom=st.session_state["2d_edge_bottom"] or None,
                 edge_label_left=st.session_state["2d_edge_left"] or None,
@@ -924,10 +927,19 @@ with st.sidebar:
 
     incident_angle = st.number_input("Incident angle (deg)", format="%.4f", key="incident_angle")
     incident_angle_from_filename = st.checkbox(
-        "Auto-detect each file's incident angle from its filename "
-        "(the '0p095'-style convention, e.g. 'sample_0p095_1234.tif' -> "
-        "0.095 deg) -- falls back to the value above if no pattern is found",
+        "Auto-detect each file's incident angle from its filename",
         key="incident_angle_from_filename",
+        help="Reads the 'p'-as-decimal-point convention, e.g. "
+             "'sample_0p095_1234.tif' -> 0.095 deg.\n\n"
+             "Filenames often carry several such values — "
+             "'Q1_01_35p0_0p1_0627.tif' has a contact angle (35.0) as well "
+             "as the incident angle (0.1). Only values of "
+             f"{gc.MAX_PLAUSIBLE_INCIDENT_ANGLE_DEG:g} deg or less are "
+             "considered, since a grazing-incidence angle is always a "
+             "fraction of a degree, so the 35.0 is ignored.\n\n"
+             "If a name has no usable value, or more than one plausible "
+             "one, the fixed value above is used for that file instead and "
+             "the reason is written in the log.",
     )
 
     mask_upload = st.file_uploader("Mask file (optional)", type=["tif", "tiff", "npy"], key="mask_upload")
@@ -1278,6 +1290,16 @@ def style_widgets(show_cmap: bool, show_sector_color: bool, key_prefix: str):
                  "colorbar values easier to read but compresses weak features.",
         )
 
+        # Inside `if show_cmap:` -- only the panels that actually draw a
+        # colour bar get the switch. The pole-figure tab plots a chi
+        # profile, which has none, and a checkbox there would do nothing.
+        st.checkbox(
+            "Show the intensity colour bar", key=f"{p}_show_colorbar",
+            help="Off removes the bar entirely rather than hiding it, so "
+                 "the plot fills the whole figure instead of leaving a "
+                 "blank strip on the right.",
+        )
+
     st.checkbox("Set explicit colour-scale range (instead of automatic percentile)",
                 key=f"{p}_use_manual_scale")
     if st.session_state[f"{p}_use_manual_scale"]:
@@ -1424,6 +1446,10 @@ with tab_2d:
                 st.session_state["2d_axis_labels"], st.session_state["2d_dpi"],
                 st.session_state["2d_tick_spacing"], st.session_state["2d_subtick_spacing"],
                 st.session_state["2d_color_scale"],
+                # part of the key: the cache is keyed on everything that
+                # changes the output, so leaving this out would serve the
+                # previous render back and make the toggle look broken
+                st.session_state["2d_show_colorbar"],
                 st.session_state["2d_edge_top"], st.session_state["2d_edge_bottom"],
                 st.session_state["2d_edge_left"], st.session_state["2d_edge_right"],
                 edge_rotations_cache_tuple("2d"),
@@ -1443,6 +1469,7 @@ with tab_2d:
                     tick_spacing=st.session_state["2d_tick_spacing"],
                     subtick_spacing=st.session_state["2d_subtick_spacing"] or None,
                     color_scale=st.session_state["2d_color_scale"],
+                    show_colorbar=st.session_state["2d_show_colorbar"],
                     edge_label_top=st.session_state["2d_edge_top"] or None,
                     edge_label_bottom=st.session_state["2d_edge_bottom"] or None,
                     edge_label_left=st.session_state["2d_edge_left"] or None,
@@ -1450,7 +1477,12 @@ with tab_2d:
                     edge_label_rotations=edge_rotations_dict("2d"),
                 )
                 buf = io.BytesIO()
-                fig2d.savefig(buf, format="png", dpi=st.session_state["2d_dpi"])
+                # same trim as plot_2d_image does on its own save path: with
+                # no colour bar the figure would otherwise keep the blank
+                # strip where the bar used to be
+                fig2d.savefig(buf, format="png", dpi=st.session_state["2d_dpi"],
+                               **({} if st.session_state["2d_show_colorbar"]
+                                  else {"bbox_inches": "tight"}))
                 plt.close(fig2d)
                 gc.cache_png_bytes(d2_plot_cache, img_cache_key, buf.getvalue())
             png_bytes_2d = d2_plot_cache[img_cache_key]

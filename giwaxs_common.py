@@ -490,24 +490,59 @@ def load_pole_figure_q_map(path: str) -> Dict[str, List[float]]:
     return result
 
 
-def parse_incident_angle_from_filename(filename: str) -> Optional[float]:
-    """Try to extract an incident angle from a filename using the common
-    beamline convention of encoding a decimal value with 'p' in place of
-    the decimal point, as its own underscore-separated token -- e.g.
-    'sample_0p095_1234.tif' -> 0.095, 'sample_0p1_scan.tif' -> 0.1.
+#: An incident angle above this is not grazing incidence at all, so a
+#: filename token that large is something else -- a temperature, a contact
+#: angle, a stage position. Used to tell the real angle apart from the
+#: other 'NpM' tokens beamline filenames routinely carry.
+MAX_PLAUSIBLE_INCIDENT_ANGLE_DEG = 5.0
 
-    Returns None if no such token is found (caller should fall back to a
-    manually-specified default in that case, since this is a best-effort
-    heuristic that can occasionally false-match an unrelated numeric token
-    if a filename happens to contain another '<digits>p<digits>' pattern).
-    """
+
+def incident_angle_candidates_in_filename(filename: str) -> List[float]:
+    """Every '<digits>p<digits>' token in the filename, as floats, in the
+    order they appear. These are CANDIDATES, not answers -- see
+    parse_incident_angle_from_filename."""
     base = os.path.splitext(os.path.basename(filename))[0]
-    matches = re.findall(r'(?:^|_)(\d+p\d+)(?:_|$)', base)
-    for m in matches:
+    out: List[float] = []
+    # Lookahead for the trailing separator, not a consuming group: an
+    # underscore shared between two tokens can only be eaten once, so
+    # '_35p0_0p1_' with a consuming '(?:_|$)' matches 35p0 and then can
+    # no longer see the '_' that 0p1 needs in front of it. That single
+    # character is why only the first value was ever found.
+    for m in re.findall(r'(?:^|_)(\d+p\d+)(?=_|$)', base):
         try:
-            return float(m.replace('p', '.', 1))
+            out.append(float(m.replace('p', '.', 1)))
         except ValueError:
             continue
+    return out
+
+
+def parse_incident_angle_from_filename(
+        filename: str,
+        max_plausible_deg: float = MAX_PLAUSIBLE_INCIDENT_ANGLE_DEG) -> Optional[float]:
+    """Extract the incident angle from a filename that encodes decimals
+    with 'p', e.g. 'sample_0p095_1234.tif' -> 0.095.
+
+    Real beamline filenames carry more than one such token. A name like
+    'Q1_01_35p0_0p1_0627.tif' holds a contact angle (35.0) AND the
+    incident angle (0.1), and simply taking the first match returns 35
+    degrees -- which is not grazing incidence at all, and silently
+    produces a badly distorted reciprocal-space map rather than any kind
+    of error.
+
+    So candidates are filtered by physics: a grazing-incidence angle is
+    a fraction of a degree, never tens of degrees. Anything above
+    max_plausible_deg is some other quantity and is discarded.
+
+    Returns the angle when exactly one candidate survives; None when none
+    does, and also None when SEVERAL do -- two plausible angles in one
+    name is genuinely ambiguous, and guessing between them is how a whole
+    batch ends up silently processed at the wrong angle. The caller falls
+    back to the explicit value and says why.
+    """
+    plausible = [a for a in incident_angle_candidates_in_filename(filename)
+                 if 0.0 < a <= max_plausible_deg]
+    if len(plausible) == 1:
+        return plausible[0]
     return None
 
 
@@ -592,9 +627,24 @@ def resolve_incident_angle_for_file(tiff_path: str, fallback_deg: float,
     parsed = parse_incident_angle_from_filename(tiff_path)
     if parsed is None:
         if verbose:
-            print(f"  Could not parse an incident angle from the filename "
-                  f"'{os.path.basename(tiff_path)}' -- using fallback "
-                  f"--incident-angle={fallback_deg} for this file.")
+            name = os.path.basename(tiff_path)
+            found = incident_angle_candidates_in_filename(tiff_path)
+            plausible = [a for a in found
+                         if 0.0 < a <= MAX_PLAUSIBLE_INCIDENT_ANGLE_DEG]
+            if len(plausible) > 1:
+                why = (f"it contains more than one value that could be the "
+                       f"incident angle ({', '.join(f'{a:g}' for a in plausible)} "
+                       f"deg) and guessing between them is not safe")
+            elif found:
+                why = (f"the only 'NpM' value(s) in it "
+                       f"({', '.join(f'{a:g}' for a in found)}) are too large "
+                       f"to be a grazing-incidence angle "
+                       f"(> {MAX_PLAUSIBLE_INCIDENT_ANGLE_DEG:g} deg), so they "
+                       f"are some other quantity")
+            else:
+                why = "it contains no 'NpM' value"
+            print(f"  Could not read an incident angle from '{name}': {why} "
+                  f"-- using {fallback_deg} deg for this file instead.")
         return fallback_deg
     if verbose:
         print(f"  Incident angle from filename: {parsed} deg")
@@ -1914,7 +1964,8 @@ def plot_2d_image(qx, qy, intensity, out_path=None, qlim_x=None, qlim_y=None,
                    edge_label_left: Optional[str] = None, edge_label_right: Optional[str] = None,
                    edge_label_rotations: Optional[Dict[str, float]] = None,
                    axis_label_style: str = "xyz", tick_spacing: float = 0.5,
-                   subtick_spacing: Optional[float] = None, color_scale: str = "log"):
+                   subtick_spacing: Optional[float] = None, color_scale: str = "log",
+                   show_colorbar: bool = True):
     """2D GIWAXS q-space image -- deliberately has NO title (kept plain for
     publication/figure use); use an external caption/label if you need one.
 
@@ -1925,6 +1976,11 @@ def plot_2d_image(qx, qy, intensity, out_path=None, qlim_x=None, qlim_y=None,
     ...) on a linear mapping -- easier to read exact values off, but weak
     features next to strong ones (e.g. higher-order peaks near the direct
     beam) will be much less visible than under a log scale.
+
+    show_colorbar: draw the intensity bar on the right (default). Turn it
+    off for a panel that will sit in a multi-panel figure sharing a single
+    colorbar -- the bar is then removed entirely rather than hidden, so
+    the plot fills the whole figure width and panels line up.
 
     subtick_spacing: minor-tick interval (1/A), OFF by default (None or 0
     both mean "no minor ticks", matching typical publication-figure
@@ -1941,7 +1997,19 @@ def plot_2d_image(qx, qy, intensity, out_path=None, qlim_x=None, qlim_y=None,
     if color_scale not in ("log", "linear"):
         raise GiwaxsError(f"Unknown color_scale '{color_scale}' -- use 'log' or 'linear'.")
     with style_context(font_family, font_size):
-        fig, ax = plt.subplots(1, 2, width_ratios=[1, 0.05], figsize=figsize)
+        # Without the colorbar the figure is a single axes, not a 1x2 grid
+        # with the second one hidden: a hidden axes still reserves its
+        # column, so the panel would keep a strip of blank space on the
+        # right and the plot itself would stay narrower than the figure.
+        # Panels destined for a multi-panel figure usually share ONE
+        # colorbar, so that strip is exactly what has to go.
+        if show_colorbar:
+            fig, axes = plt.subplots(1, 2, width_ratios=[1, 0.05], figsize=figsize)
+            ax, cax = axes[0], axes[1]
+        else:
+            fig, ax = plt.subplots(1, 1, figsize=figsize)
+            cax = None
+        ax = [ax, cax]          # keep the rest of the body unchanged
 
         v_lo, v_hi = resolve_vmin_vmax(intensity, vmin_percentile, vmin, vmax, vmax_percentile,
                                         color_scale=color_scale)
@@ -1974,14 +2042,21 @@ def plot_2d_image(qx, qy, intensity, out_path=None, qlim_x=None, qlim_y=None,
         # "Adding colorbar to a different Figure ... than ... fig.colorbar is
         # called on"). Going through the figure object keeps it bound to the
         # right one regardless of what else is being drawn concurrently.
-        cbar = fig.colorbar(mesh, cax=ax[1], orientation="vertical")
-        cbar.ax.tick_params(which="both", direction="in")
+        if show_colorbar:
+            cbar = fig.colorbar(mesh, cax=ax[1], orientation="vertical")
+            cbar.ax.tick_params(which="both", direction="in")
         fig.tight_layout()
         add_edge_labels(fig, top=edge_label_top, bottom=edge_label_bottom,
                          left=edge_label_left, right=edge_label_right, fontsize=font_size,
                          **(edge_label_rotations or {}))
         if out_path:
-            fig.savefig(out_path, dpi=dpi)
+            # Without the colour bar the axes keeps its height-limited width
+            # (aspect is equal, as a q-space map requires), so the space the
+            # bar used to fill is simply left blank on the right. Trimming on
+            # save turns that into an actual bare panel rather than a plot
+            # with a gap where the bar was.
+            fig.savefig(out_path, dpi=dpi,
+                         **({} if show_colorbar else {"bbox_inches": "tight"}))
             plt.close(fig)
             return None
         return fig
@@ -2102,10 +2177,14 @@ def compute_chi_profile_at_q(fi, img_data, mask, target_q, dq, npt,
 def plot_pole_figure(chi_axis, profile, out_path, target_q, dq, title=None,
                       herman_s=None, cmap: str = "viridis",
                       vmin: Optional[float] = None, vmax: Optional[float] = None,
-                      font_family: Optional[str] = None, font_size: Optional[float] = None):
+                      font_family: Optional[str] = None, font_size: Optional[float] = None,
+                      show_colorbar: bool = True):
     """Fiber-texture pole figure: chi (tilt from surface normal) is radial,
     phi is angular and assumed uniform (revolved) since a single frame
     cannot resolve azimuthal (phi) texture.
+
+    show_colorbar: draw the intensity bar (default). Off gives a bare
+    pole figure, for a layout that labels the scale elsewhere.
     """
     with style_context(font_family, font_size):
         tilt = np.abs(chi_axis)
@@ -2139,8 +2218,10 @@ def plot_pole_figure(chi_axis, profile, out_path, target_q, dq, title=None,
             title_text += f"\nHerman's orientation factor S = {herman_s:.3f}"
         ax.set_title(title_text, fontsize=(font_size * 0.8) if font_size else 9)
 
-        cb = fig.colorbar(mesh, ax=ax, pad=0.12)  # fig.colorbar, not plt.* -- see plot_2d_image
-        cb.set_label("Intensity (a.u.)")
+        if show_colorbar:
+            # fig.colorbar, not plt.* -- see plot_2d_image
+            cb = fig.colorbar(mesh, ax=ax, pad=0.12)
+            cb.set_label("Intensity (a.u.)")
         fig.tight_layout()
         fig.savefig(out_path, dpi=200)
         plt.close(fig)
