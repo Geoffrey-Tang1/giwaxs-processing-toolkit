@@ -179,6 +179,21 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                          "given -- an opt-in extra, not shown by default.")
 
     # --- Peak fitting (optional; off unless at least one --fit-region given) ---
+    p.add_argument("--box-cut", type=gc.parse_range, action="append", default=None,
+                    dest="box_cuts", metavar="QXY_LO,QXY_HI",
+                    help="Add an out-of-plane profile taken from a fixed q_xy "
+                         "strip instead of an angular wedge. Repeat for more "
+                         "strips. A wedge opens linearly with q, so near the "
+                         "origin it is narrower than the beamstop and returns "
+                         "nothing until it clears it -- on this detector the "
+                         "+-8 deg wedge starts only at q = 0.21, which cuts the "
+                         "low-q flank off a lamellar (100) sitting at 0.25. A "
+                         "strip passes beside the stop all the way down. Start "
+                         "with --box-cut 0.025,0.05: 0.025 is the stop's outer "
+                         "edge, and a strip that narrow keeps about three "
+                         "quarters of the peak intensity an oriented reflection "
+                         "puts on the axis. Wider strips drift off the peak -- "
+                         "0.03,0.12 kept only 13-38%% of it on real data.")
     p.add_argument("--fit-region", type=gc.parse_fit_region, action="append", default=None,
                     dest="fit_regions", metavar="QMIN:QMAX[:LABEL]",
                     help="Fit a diffraction peak within this q window (inverse "
@@ -423,6 +438,61 @@ def process_file(tiff_path: str, fi, get_unit_fiber, mask, args, out_dirs, fabio
             fit_peaks_for_linecut(
                 q, intensity, args, base, tag,
                 sector_label=f"({angles[0]}, {angles[1]}) deg",
+                out_dirs=out_dirs, fit_rows=fit_rows if fit_rows is not None else [],
+            )
+
+    # --- Box cuts: an out-of-plane profile from a fixed q_xy strip ---------
+    # Taken from the already-remapped map rather than a fresh integration,
+    # so it inherits exactly the same geometry, mask and binning as the 2D
+    # image above -- there is nothing for the two to disagree about.
+    for qxy_lo, qxy_hi in (args.box_cuts or []):
+        q, intensity = gc.box_cut(res_I, res_qx, res_qy, along="qz",
+                                   across_range=(qxy_lo, qxy_hi))
+        tag = f"boxcut_qxy_{qxy_lo:g}_to_{qxy_hi:g}".replace(".", "p")
+        label = f"box cut, q_xy {qxy_lo:g}-{qxy_hi:g} 1/A"
+
+        data_out_path = os.path.join(out_dirs["linecuts"], f"{base}_lineprofile_{tag}.txt")
+        np.savetxt(data_out_path, np.c_[q, intensity], header="Q(1/A)\tIntensity(a.u.)")
+
+        plot_out_path = os.path.join(out_dirs["linecuts"], f"{base}_lineprofile_{tag}.png")
+        gc.plot_1d_linecut(q, intensity, plot_out_path, (qxy_lo, qxy_hi),
+                            title=f"{base}: {label}",
+                            line_color=args.line_color, font_family=args.font_family,
+                            font_size=args.font_size, dpi=args.dpi,
+                            q_range=args.linecut_q_range,
+                            tick_spacing=args.linecut_tick_spacing,
+                            subtick_spacing=args.linecut_subtick_spacing)
+
+        overlay_path = os.path.join(out_dirs["images"], f"{base}_sector_{tag}.png")
+        xlabel, ylabel = gc.AXIS_LABELS.get(args.axis_labels, gc.AXIS_LABELS["ip_oop"])
+        with gc.style_context(args.font_family, args.font_size):
+            fig, ax = plt.subplots(figsize=gc.DEFAULT_FIGSIZE)
+            v_lo, v_hi = gc.resolve_vmin_vmax(res_I, args.vmin_percentile, args.vmin,
+                                               args.vmax, args.vmax_percentile,
+                                               color_scale=args.color_scale)
+            norm = (LogNorm(vmin=v_lo, vmax=v_hi) if args.color_scale == "log"
+                     else Normalize(vmin=v_lo, vmax=v_hi))
+            ax.pcolormesh(res_qx, res_qy, res_I, norm=norm, cmap=args.cmap)
+            ax.set_facecolor("black")
+            ax.set_aspect("equal")
+            ax.set_xlim(args.qip_plot_range)
+            ax.set_ylim(args.qoop_plot_range)
+            for sign in (-1.0, 1.0):
+                ax.axvspan(sign * qxy_lo, sign * qxy_hi,
+                           color=args.sector_line_color, alpha=0.30, lw=0)
+            ax.tick_params(axis="both", which="both", direction="in")
+            ax.set_xlabel(xlabel)
+            ax.set_ylabel(ylabel)
+            fig.suptitle(f"{base}: {label}")
+            fig.tight_layout()
+            fig.savefig(overlay_path, dpi=args.dpi)
+            plt.close(fig)
+
+        print(f"  Saved box cut q_xy {qxy_lo:g}-{qxy_hi:g} -> {data_out_path}")
+
+        if args.fit_regions:
+            fit_peaks_for_linecut(
+                q, intensity, args, base, tag, sector_label=label,
                 out_dirs=out_dirs, fit_rows=fit_rows if fit_rows is not None else [],
             )
 

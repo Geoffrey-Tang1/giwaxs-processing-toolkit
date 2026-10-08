@@ -130,6 +130,9 @@ st.session_state.setdefault("pending_geometry_choice", None)
 st.session_state.setdefault("centre_override", None)
 st.session_state.setdefault("auto_beamstop_mask", True)
 st.session_state.setdefault("mask_detector_gaps", False)
+st.session_state.setdefault("use_box_cut", False)
+st.session_state.setdefault("box_qxy_lo", 0.025)
+st.session_state.setdefault("box_qxy_hi", 0.050)
 st.session_state.setdefault("measured_centre", None)
 st.session_state.setdefault("calibration_confirmed", False)
 st.session_state.setdefault("calibration_diagnostic_path", None)
@@ -623,11 +626,11 @@ def build_2d_results_zip(qip_range, qoop_range) -> bytes:
             plt.close(fig2d)
             zf.writestr(f"{name}/{name}_2D_GIWAXS.png", img_buf.getvalue())
 
-            for angles, q, intensity in res["linecuts"]:
+            for angles, q, intensity, lc_label in res["linecuts"]:
                 tag = f"{angles[0]}_{angles[1]}".replace("-", "m").replace(".", "p")
                 fig1d = gc.plot_1d_linecut(
                     q, intensity, out_path=None, angle_range=angles,
-                    title=f"{name}: {angles} deg",
+                    title=f"{name}: {lc_label}",
                     line_color=st.session_state["2d_line_color"],
                     font_family=st.session_state["2d_font_family"],
                     font_size=st.session_state["2d_font_size"],
@@ -1491,6 +1494,37 @@ with tab_2d:
     qip_range = st.slider("q_ip plot range (1/Å)", -3.0, 3.0, (-0.5, 2.4), key="qip_range")
     qoop_range = st.slider("q_oop plot range (1/Å)", -1.0, 4.0, (-0.25, 2.75), key="qoop_range")
 
+    with st.expander("Box cut — an out-of-plane profile from a fixed q_xy strip"):
+        st.caption(
+            "An angular wedge opens linearly with q, so near the origin it is "
+            "narrower than the beamstop and returns nothing until it clears "
+            "it. On this geometry the ±8° wedge starts only at q = 0.21, "
+            "which cuts the low-q flank off a lamellar (100) sitting at 0.25 — "
+            "fitting that truncated peak returned d = 34.2 Å where the "
+            "in-plane cut and a strip both give ~25 Å. A fixed q_xy strip "
+            "passes beside the stop all the way down to q ≈ 0.04."
+        )
+        use_box_cut = st.checkbox("Add a box cut to every file", key="use_box_cut")
+        bc1, bc2 = st.columns(2)
+        with bc1:
+            box_qxy_lo = st.number_input(
+                "q_xy from (1/Å)", min_value=0.0, max_value=2.0, step=0.005,
+                format="%.3f", key="box_qxy_lo",
+                help="Start just outside the beamstop. Inside its shadow the "
+                     "strip returns nothing; the app reports the stop's width "
+                     "when it masks it.")
+        with bc2:
+            box_qxy_hi = st.number_input(
+                "q_xy to (1/Å)", min_value=0.0, max_value=2.0, step=0.005,
+                format="%.3f", key="box_qxy_hi",
+                help="Keep the strip narrow. An oriented reflection puts its "
+                     "intensity on the axis, so a wide strip drifts off the "
+                     "peak: 0.025–0.05 kept about three quarters of it on real "
+                     "data, while 0.03–0.12 kept only 13–38%.")
+        if box_qxy_hi <= box_qxy_lo:
+            st.warning("The upper q_xy must exceed the lower one; the box cut "
+                       "will be skipped.")
+
     # ---- Auto-define the beam centre from the data itself ---------------
     # A calibrant pins the COLUMN well and leaves the ROW nearly free (the
     # beam sits near the detector edge, so every ring is cut off and the
@@ -1659,7 +1693,24 @@ with tab_2d:
                             ip_range=angles, mask=mask,
                         )
                         q, intensity = gc.linecut_drop_empty_bins(_res1d)
-                        linecuts.append((angles, q, intensity))
+                        linecuts.append((angles, q, intensity,
+                                         f"{angles} deg"))
+
+                    # A wedge opens linearly with q, so near the origin it is
+                    # narrower than the beamstop and returns nothing until it
+                    # clears it. A fixed q_xy strip passes beside the stop all
+                    # the way down, which is what a low-q lamellar order needs.
+                    if use_box_cut:
+                        try:
+                            bq, bI = gc.box_cut(
+                                res_I, res_qx, res_qy, along="qz",
+                                across_range=(box_qxy_lo, box_qxy_hi))
+                            linecuts.append((
+                                (box_qxy_lo, box_qxy_hi), bq, bI,
+                                f"box cut q_xy {box_qxy_lo:g}-{box_qxy_hi:g}"))
+                        except Exception as exc:
+                            if i == 0:
+                                st.warning(f"Box cut skipped: {exc}")
 
                     results.append({
                         "name": os.path.splitext(uf.name)[0],
@@ -1767,9 +1818,9 @@ with tab_2d:
                                 file_name=f"{res['name']}_2D_GIWAXS.png", mime="image/png",
                                 key=f"dl2d_{res['name']}")
 
-            for angles, q, intensity in res["linecuts"]:
+            for angles, q, intensity, lc_label in res["linecuts"]:
                 lc_cache_key = (
-                    res["name"], angles, st.session_state["2d_line_color"],
+                    res["name"], angles, lc_label, st.session_state["2d_line_color"],
                     st.session_state["2d_font_family"], st.session_state["2d_font_size"],
                     st.session_state["2d_dpi"], st.session_state["2d_linecut_tick_spacing"],
                     st.session_state["2d_edge_top"], st.session_state["2d_edge_bottom"],
@@ -2066,8 +2117,8 @@ with tab_peakfit:
 
     linecut_lookup = {}
     for res in st.session_state["processed_2d"] or []:
-        for angles, q, intensity in res["linecuts"]:
-            linecut_lookup[f"{res['name']} :: {angles} deg"] = (q, intensity)
+        for angles, q, intensity, lc_label in res["linecuts"]:
+            linecut_lookup[f"{res['name']} :: {lc_label}"] = (q, intensity)
 
     st.subheader("1. Peak shape")
     shape_col, k_col = st.columns(2)
