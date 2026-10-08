@@ -78,7 +78,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     gc.add_geometry_args(p)
     gc.add_calibration_args(p)
 
-    p.add_argument("--qip-plot-range", type=gc.parse_range, default=(-0.5, 1.99),
+    p.add_argument("--qip-plot-range", type=gc.parse_range, default=(-0.5, 2.0),
                     help="X axis (q_ip) plot limits for the 2D image, as "
                          "'min,max' in inverse Angstrom.")
     p.add_argument("--qoop-plot-range", type=gc.parse_range, default=(-0.05, 2.49),
@@ -152,13 +152,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                          "most 0.25%%, widths unchanged, and only the few bins "
                          "sitting directly on a gap read low, by up to 8%%. "
                          "The beamstop is always masked either way.")
-    p.add_argument("--tick-color", default="white",
+    p.add_argument("--tick-color", default="black",
                     help="Colour of the 2D image's tick MARKS. They point into "
                          "the map, so they sit on the image rather than on the "
-                         "page and a dark mark disappears into a log-scaled "
-                         "one. White by default; change it for a light "
-                         "colormap. The labels stay outside on white and are "
-                         "not affected.")
+                         "page -- pass 'white' if a dark colormap swallows "
+                         "them. The labels stay outside on white and are not "
+                         "affected.")
     p.add_argument("--axes-linewidth", type=float, default=1.6,
                     help="Width in points of the 2D image's frame and tick "
                          "marks. Matplotlib's default is 0.8, which survives a "

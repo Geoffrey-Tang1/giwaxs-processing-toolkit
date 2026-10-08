@@ -92,7 +92,7 @@ STYLE_DEFAULTS = {
     "vmax_percentile": 99.9,
     "line_color": "#1f77b4",
     "sector_line_color": "#00ffff",
-    "tick_color": "#ffffff",
+    "tick_color": "#000000",
     "axes_linewidth": 1.6,
     "font_family": "Arial",
     "font_size": 16.0,
@@ -1555,7 +1555,7 @@ with tab_2d:
         key="extra_sectors_2d",
     )
 
-    qip_range = st.slider("q_ip plot range (1/Å)", -3.0, 3.0, (-0.5, 1.99), key="qip_range")
+    qip_range = st.slider("q_ip plot range (1/Å)", -3.0, 3.0, (-0.5, 2.0), key="qip_range")
     qoop_range = st.slider("q_oop plot range (1/Å)", -1.0, 4.0, (-0.05, 2.49), key="qoop_range")
 
     with st.expander("Box cut — an out-of-plane profile from a fixed q_xy strip"):

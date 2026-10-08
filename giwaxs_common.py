@@ -1966,7 +1966,7 @@ def plot_2d_image(qx, qy, intensity, out_path=None, qlim_x=None, qlim_y=None,
                    edge_label_left: Optional[str] = None, edge_label_right: Optional[str] = None,
                    edge_label_rotations: Optional[Dict[str, float]] = None,
                    axis_label_style: str = "xyz", tick_spacing: float = 0.5,
-                   tick_color: str = "white",
+                   tick_color: str = "black",
                    axes_linewidth: float = 1.6,
                    subtick_spacing: Optional[float] = None, color_scale: str = "log",
                    show_colorbar: bool = True):
@@ -2038,9 +2038,9 @@ def plot_2d_image(qx, qy, intensity, out_path=None, qlim_x=None, qlim_y=None,
             ax[0].xaxis.set_minor_locator(NullLocator())
             ax[0].yaxis.set_minor_locator(NullLocator())
         # The ticks point INTO the map, so they sit on the image rather than
-        # on the page: on a dark log-scaled map a black mark is invisible,
-        # which is why white is the default here and not elsewhere. Only the
-        # marks are recoloured -- the labels stay outside on white paper.
+        # on the page -- hence tick_color is a knob at all, and hence they
+        # are kept SHORT: a long inward mark eats into the data. Only the
+        # marks are recoloured; the labels stay outside on white paper.
         #
         # Frame and ticks are also drawn heavier than matplotlib's 0.8 pt
         # default. A hairline survives a screen but thins out in print and
@@ -2048,10 +2048,10 @@ def plot_2d_image(qx, qy, intensity, out_path=None, qlim_x=None, qlim_y=None,
         # is where these end up.
         ax[0].tick_params(axis="both", which="major", direction="in",
                            color=tick_color, width=axes_linewidth,
-                           length=4.0 + 2.0 * axes_linewidth)
+                           length=0.8 + 0.9 * axes_linewidth)
         ax[0].tick_params(axis="both", which="minor", direction="in",
                            color=tick_color, width=axes_linewidth * 0.75,
-                           length=2.0 + 1.2 * axes_linewidth)
+                           length=0.4 + 0.5 * axes_linewidth)
         for _spine in ax[0].spines.values():
             _spine.set_linewidth(axes_linewidth)
         # fig.colorbar, NOT plt.colorbar: the pyplot version routes through
