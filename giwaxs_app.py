@@ -89,8 +89,6 @@ STYLE_DEFAULTS = {
     "vmin": 100.0,
     "vmax": 100000.0,
     "vmin_percentile": 30.0,
-    "fill_qxy_gap": True,
-    "auto_beamstop_mask": True,
     "vmax_percentile": 99.9,
     "line_color": "#1f77b4",
     "sector_line_color": "#00ffff",
@@ -130,6 +128,8 @@ st.session_state.setdefault("processed_pf", None)
 st.session_state.setdefault("active_geometry", None)
 st.session_state.setdefault("pending_geometry_choice", None)
 st.session_state.setdefault("centre_override", None)
+st.session_state.setdefault("auto_beamstop_mask", True)
+st.session_state.setdefault("fill_qxy_gap", False)
 st.session_state.setdefault("measured_centre", None)
 st.session_state.setdefault("calibration_confirmed", False)
 st.session_state.setdefault("calibration_diagnostic_path", None)
@@ -1068,14 +1068,13 @@ with st.sidebar:
                  "covers it.",
         )
         fill_qxy_gap = st.checkbox(
-            "Close the thin beamstop gap at q_xy = 0", key="fill_qxy_gap",
-            help="The beamstop leaves a narrow empty stripe at q_xy = 0 that "
-                 "reads as a line ruled down the middle of the figure. A "
-                 "fibre-textured map is symmetric about q_xy = 0, so the "
-                 "measured side is mirrored across the gap and interpolated "
-                 "where the mirror is empty too. Cosmetic: it only fills a gap "
-                 "already bounded by data on both sides, and never touches the "
-                 "missing wedge, which is genuinely unmeasured.",
+            "Cosmetically close the gap at q_xy = 0 (off by default)",
+            key="fill_qxy_gap",
+            help="Paints over the empty stripe at q_xy = 0 by mirroring the "
+                 "measured side across it. Off by default: once the beamstop "
+                 "is masked the gap is wide (tens of bins), and anything put "
+                 "there is invented rather than measured. Turn it on only for "
+                 "a presentation figure, and say so in the caption.",
         )
 
 
@@ -1591,6 +1590,7 @@ with tab_2d:
                     if mask_args is not None:
                         mask = gc.load_mask(mask_args, fabio, img.shape)
 
+                    _bs = None
                     if auto_beamstop_mask:
                         _bs = gc.find_beamstop_mask(
                             img, fi.poni2 / fi.detector.pixel2)
@@ -1600,9 +1600,10 @@ with tab_2d:
                                 f"({100 * _bs.mean():.2f}% of the detector). "
                                 f"Its shadow runs up the beam column, through "
                                 f"the out-of-plane sector.")
-                        mask = gc.combine_masks(mask, _bs)
-                    if mask is not None and not np.asarray(mask).any():
-                        mask = None
+                    # Always through combine_masks with the detector: handing
+                    # pyFAI any explicit mask replaces its detector mask
+                    # rather than adding to it.
+                    mask = gc.combine_masks(mask, _bs, detector=fi.detector)
 
                     (unit_ip, unit_oop, unit_chi, unit_qtot), angle_deg = units_for_file(
                         get_unit_fiber, uf.name, verbose=False
@@ -1645,12 +1646,13 @@ with tab_2d:
                     linecuts = []
                     incident_angle_rad = np.deg2rad(angle_deg)
                     for angles in sectors:
-                        q, intensity = fi.integrate1d_grazing_incidence(
+                        _res1d = fi.integrate1d_grazing_incidence(
                             data=img, incident_angle=incident_angle_rad,
                             unit_ip=unit_chi, unit_oop=unit_qtot,
                             npt_oop=int(npt), npt_ip=int(npt),
                             ip_range=angles, mask=mask,
                         )
+                        q, intensity = gc.linecut_drop_empty_bins(_res1d)
                         linecuts.append((angles, q, intensity))
 
                     results.append({

@@ -2302,14 +2302,55 @@ def find_beamstop_mask(image, beam_col, rel_threshold: float = 0.30,
     return mask
 
 
-def combine_masks(*masks, shape=None):
-    """OR together any masks that are actually present (None entries skipped).
+def linecut_drop_empty_bins(result):
+    """Return (q, intensity) with bins no pixel ever reached removed.
+
+    pyFAI reports an empty bin as intensity 0. That is a different claim
+    from "nothing was measured here": on a log axis it plunges to the
+    floor and rules a spike through the plot, in a .txt file it is
+    indistinguishable from a real zero reading, and a peak fit will
+    happily try to pass through it.
+
+    Empty bins are not rare in a narrow sector: a detector module gap can
+    take every pixel that would have fed a bin. The result object carries
+    the per-bin pixel count, so use that rather than inferring emptiness
+    from the value, which would also discard any genuine zero.
+
+    Accepts a pyFAI result object or a plain (q, intensity) pair.
+    """
+    q = np.asarray(result[0], dtype=float)
+    intensity = np.asarray(result[1], dtype=float)
+    count = getattr(result, "count", None)
+    if count is not None:
+        keep = np.asarray(count, dtype=float) > 0
+    else:
+        # Older pyFAI with no count array: an exact 0.0 after averaging is
+        # overwhelmingly an empty bin rather than a measured zero.
+        keep = intensity != 0.0
+    keep &= np.isfinite(q) & np.isfinite(intensity)
+    return q[keep], intensity[keep]
+
+
+def combine_masks(*masks, detector=None, shape=None):
+    """OR together any masks that are present (None entries skipped).
+
+    ALWAYS pass `detector` when the result will go to pyFAI. pyFAI's
+    create_mask() reads `if mask is None: mask = self.mask` -- an explicit
+    mask REPLACES the detector's own mask rather than adding to it. So
+    handing pyFAI a beamstop mask without the detector mask folded in
+    silently un-masks every module gap and known bad pixel: on a Pilatus
+    2M that gives back 197,365 pixels in order to mask 12,279. The gaps
+    then average in as zero intensity, which is the exact failure the
+    beamstop mask exists to prevent.
 
     Returns an int8 array in pyFAI's convention (nonzero = excluded), or
     None when nothing is masked, so callers can pass it straight through.
     """
     out = None
-    for m in masks:
+    sources = list(masks)
+    if detector is not None:
+        sources.append(getattr(detector, "mask", None))
+    for m in sources:
         if m is None:
             continue
         a = np.asarray(m)
@@ -2320,7 +2361,6 @@ def combine_masks(*masks, shape=None):
     if out is None or not out.any():
         return None
     return out.astype(np.int8)
-
 
 def find_beam_col_from_symmetry(image, centre_guess=None, search_half_width: int = 60,
                                  row_band=None, max_lever: int = 400, row_bin: int = 8,

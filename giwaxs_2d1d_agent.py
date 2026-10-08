@@ -140,14 +140,13 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                          "this when the calibrant was taken in a different "
                          "detector position -- a case a calibrant fit cannot "
                          "detect, since it reports a fine residual anyway.")
-    p.add_argument("--no-fill-qxy-gap", action="store_true",
-                    help="Leave the thin beamstop gap at q_xy = 0 empty. By "
-                         "default it is closed by mirroring the measured "
-                         "side across it (a fibre-textured map is symmetric "
-                         "about q_xy = 0) and interpolating where the mirror "
-                         "is empty too. Cosmetic only: a gap wider than 12 "
-                         "bins, or one not bounded by data on both sides, is "
-                         "never filled, so the missing wedge stays visible.")
+    p.add_argument("--fill-qxy-gap", action="store_true",
+                    help="Cosmetically close the gap at q_xy = 0 by mirroring "
+                         "the measured side across it. OFF by default: once "
+                         "the beamstop is masked the gap is tens of bins wide, "
+                         "and anything placed there is invented rather than "
+                         "measured. For a presentation figure only, and say so "
+                         "in the caption.")
     p.add_argument("--no-colorbar", dest="show_colorbar", action="store_false",
                     help="Leave the intensity colour bar off the saved image. "
                          "Useful when the figure will carry its scale "
@@ -300,13 +299,15 @@ def process_file(tiff_path: str, fi, get_unit_fiber, mask, args, out_dirs, fabio
 
     # The beamstop is per-frame: detect it here, not once up front, so a
     # batch in which the stop moved is still handled correctly.
-    file_mask = mask
+    bs = None
     if not args.no_auto_beamstop_mask:
         bs = gc.find_beamstop_mask(img_data, fi.poni2 / fi.detector.pixel2)
         if bs.any():
             print(f"  Beamstop masked: {int(bs.sum())} px "
                   f"({100 * bs.mean():.2f}% of the detector)")
-        file_mask = gc.combine_masks(mask, bs, shape=img_data.shape)
+    # Always through combine_masks with the detector: handing pyFAI any
+    # explicit mask replaces its detector mask rather than adding to it.
+    file_mask = gc.combine_masks(mask, bs, detector=fi.detector)
 
     # --- 2D remap into (q_ip, q_oop) space ------------------------------------
     res2d = fi.integrate2d_grazing_incidence(
@@ -318,7 +319,7 @@ def process_file(tiff_path: str, fi, get_unit_fiber, mask, args, out_dirs, fabio
     res_I, res_qx, res_qy = res2d[0:3]
     res_qx = -np.flip(res_qx)
     res_I = np.flip(res_I, axis=1)
-    if not args.no_fill_qxy_gap:
+    if args.fill_qxy_gap:
         res_I, _gap = gc.fill_qxy_gap(res_I, res_qx)
 
     img_out_path = os.path.join(out_dirs["images"], f"{base}_2D_GIWAXS.png")
@@ -359,7 +360,7 @@ def process_file(tiff_path: str, fi, get_unit_fiber, mask, args, out_dirs, fabio
             ip_range=angles,
             mask=file_mask,
         )
-        q, intensity = res1d
+        q, intensity = gc.linecut_drop_empty_bins(res1d)
 
         tag = f"{angles[0]}_to_{angles[1]}_deg".replace("-", "m")
         data_out_path = os.path.join(out_dirs["linecuts"], f"{base}_lineprofile_{tag}.txt")
