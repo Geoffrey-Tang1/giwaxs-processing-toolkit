@@ -90,6 +90,7 @@ STYLE_DEFAULTS = {
     "vmax": 100000.0,
     "vmin_percentile": 30.0,
     "fill_qxy_gap": True,
+    "auto_beamstop_mask": True,
     "vmax_percentile": 99.9,
     "line_color": "#1f77b4",
     "sector_line_color": "#00ffff",
@@ -1055,6 +1056,17 @@ with st.sidebar:
             help="Resolution of the re-gridded q-space image/profiles. "
                  "Higher = finer but slower. You usually don't need to touch this.",
         )
+        auto_beamstop_mask = st.checkbox(
+            "Detect and mask the beamstop shadow", key="auto_beamstop_mask",
+            help="A grazing-incidence beamstop is a long finger covering the "
+                 "specular rod, running straight up the beam column — exactly "
+                 "where the out-of-plane sector (chi near 0) lies. Left "
+                 "unmasked, its shadow pixels are averaged in as genuine low "
+                 "intensity rather than ignored, which pulls the out-of-plane "
+                 "cut down and breaks it up below the top of the stop. Leave "
+                 "this on unless you are supplying your own mask that already "
+                 "covers it.",
+        )
         fill_qxy_gap = st.checkbox(
             "Close the thin beamstop gap at q_xy = 0", key="fill_qxy_gap",
             help="The beamstop leaves a narrow empty stripe at q_xy = 0 that "
@@ -1578,6 +1590,19 @@ with tab_2d:
                     mask = np.zeros(img.shape, dtype=bool)
                     if mask_args is not None:
                         mask = gc.load_mask(mask_args, fabio, img.shape)
+
+                    if auto_beamstop_mask:
+                        _bs = gc.find_beamstop_mask(
+                            img, fi.poni2 / fi.detector.pixel2)
+                        if _bs.any() and i == 0:
+                            st.caption(
+                                f"Beamstop masked: {int(_bs.sum())} px "
+                                f"({100 * _bs.mean():.2f}% of the detector). "
+                                f"Its shadow runs up the beam column, through "
+                                f"the out-of-plane sector.")
+                        mask = gc.combine_masks(mask, _bs)
+                    if mask is not None and not np.asarray(mask).any():
+                        mask = None
 
                     (unit_ip, unit_oop, unit_chi, unit_qtot), angle_deg = units_for_file(
                         get_unit_fiber, uf.name, verbose=False

@@ -2244,6 +2244,84 @@ def check_beam_row_against_horizon(image, incident_angle_deg: float, dist: float
     )
 
 
+def find_beamstop_mask(image, beam_col, rel_threshold: float = 0.30,
+                        min_rows: int = 40, grow: int = 3):
+    """Find the beamstop shadow so it can be masked out of the integration.
+
+    This matters far more than it looks. A grazing-incidence beamstop is
+    not a small disc over the direct beam: it is a long vertical finger
+    covering the specular rod, which runs straight up the beam COLUMN --
+    exactly where the out-of-plane sector (chi near 0) lives. Unmasked,
+    those shadow pixels are not ignored; they are averaged in as genuine
+    low intensity, so the out-of-plane cut is pulled down and broken up
+    wherever the stop reaches. On the dataset this was written for that
+    understated the out-of-plane lamellar peak by 2.5x and filled the
+    region below it with ragged nonsense.
+
+    A pixel is shadow when it records far less than the rest of its OWN
+    row, which separates the stop from an overall dim frame. Only the run
+    through the beam column is taken, so unrelated dark patches are left
+    alone, and a run spanning a quarter of the width is treated as a
+    detector module gap rather than a stop. If no run persists over
+    `min_rows`, there is no beamstop and an empty mask is returned.
+
+    Returns a boolean array, True where the beamstop shadows the detector.
+    """
+    I = np.asarray(image, dtype=float)
+    h, w = I.shape
+    c = int(round(beam_col))
+    if not (0 <= c < w):
+        return np.zeros((h, w), dtype=bool)
+
+    left = I[:, max(0, c - 700):max(1, c - 200)]
+    right = I[:, min(w, c + 200):min(w, c + 700)]
+    ref_cols = np.concatenate([left, right], axis=1)
+    if ref_cols.shape[1] < 20:
+        return np.zeros((h, w), dtype=bool)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        ref = np.nanmedian(np.where(np.isfinite(ref_cols), ref_cols, np.nan), axis=1)
+    ref = np.where(np.isfinite(ref), ref, 0.0)
+
+    dark = I < (rel_threshold * ref[:, None])
+    mask = np.zeros((h, w), dtype=bool)
+    for r in range(h):
+        if not dark[r, c]:
+            continue
+        lo = c
+        while lo - 1 >= 0 and dark[r, lo - 1]:
+            lo -= 1
+        hi = c
+        while hi + 1 < w and dark[r, hi + 1]:
+            hi += 1
+        if (hi - lo + 1) > 0.25 * w:
+            continue                      # a whole dead row: module gap, not a stop
+        mask[r, max(0, lo - grow):min(w, hi + grow + 1)] = True
+    if int(mask.any(axis=1).sum()) < min_rows:
+        return np.zeros((h, w), dtype=bool)
+    return mask
+
+
+def combine_masks(*masks, shape=None):
+    """OR together any masks that are actually present (None entries skipped).
+
+    Returns an int8 array in pyFAI's convention (nonzero = excluded), or
+    None when nothing is masked, so callers can pass it straight through.
+    """
+    out = None
+    for m in masks:
+        if m is None:
+            continue
+        a = np.asarray(m)
+        if a.size == 0:
+            continue
+        b = a.astype(bool)
+        out = b if out is None else (out | b)
+    if out is None or not out.any():
+        return None
+    return out.astype(np.int8)
+
+
 def find_beam_col_from_symmetry(image, centre_guess=None, search_half_width: int = 60,
                                  row_band=None, max_lever: int = 400, row_bin: int = 8,
                                  min_contrast: float = 0.05):

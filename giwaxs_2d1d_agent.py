@@ -123,6 +123,13 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                          f"{', '.join(gc.COMMON_FONTS)}.")
     p.add_argument("--font-size", type=float, default=None,
                     help="Base font size (points) for all plot text.")
+    p.add_argument("--no-auto-beamstop-mask", action="store_true",
+                    help="Do not detect and mask the beamstop shadow. By "
+                         "default it is masked, because a grazing-incidence "
+                         "beamstop is a long finger up the beam column -- "
+                         "exactly where the out-of-plane sector lies -- and "
+                         "an unmasked shadow is averaged in as real low "
+                         "intensity rather than ignored.")
     p.add_argument("--autodefine-centre", action="store_true",
                     help="Measure the beam centre from the FIRST data file "
                          "instead of trusting the .poni or the calibration "
@@ -291,12 +298,22 @@ def process_file(tiff_path: str, fi, get_unit_fiber, mask, args, out_dirs, fabio
 
     img_data = fabio.open(tiff_path).data
 
+    # The beamstop is per-frame: detect it here, not once up front, so a
+    # batch in which the stop moved is still handled correctly.
+    file_mask = mask
+    if not args.no_auto_beamstop_mask:
+        bs = gc.find_beamstop_mask(img_data, fi.poni2 / fi.detector.pixel2)
+        if bs.any():
+            print(f"  Beamstop masked: {int(bs.sum())} px "
+                  f"({100 * bs.mean():.2f}% of the detector)")
+        file_mask = gc.combine_masks(mask, bs, shape=img_data.shape)
+
     # --- 2D remap into (q_ip, q_oop) space ------------------------------------
     res2d = fi.integrate2d_grazing_incidence(
         img_data,
         npt_ip=args.npt, npt_oop=args.npt,
         unit_ip=unit_gi_ip, unit_oop=unit_gi_oop,
-        mask=mask,
+        mask=file_mask,
     )
     res_I, res_qx, res_qy = res2d[0:3]
     res_qx = -np.flip(res_qx)
@@ -340,7 +357,7 @@ def process_file(tiff_path: str, fi, get_unit_fiber, mask, args, out_dirs, fabio
             unit_ip=unit_gi_chi, unit_oop=unit_gi_qtot,
             npt_oop=args.npt, npt_ip=args.npt,
             ip_range=angles,
-            mask=mask,
+            mask=file_mask,
         )
         q, intensity = res1d
 
