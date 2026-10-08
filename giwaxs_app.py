@@ -129,7 +129,7 @@ st.session_state.setdefault("active_geometry", None)
 st.session_state.setdefault("pending_geometry_choice", None)
 st.session_state.setdefault("centre_override", None)
 st.session_state.setdefault("auto_beamstop_mask", True)
-st.session_state.setdefault("fill_qxy_gap", False)
+st.session_state.setdefault("mask_detector_gaps", False)
 st.session_state.setdefault("measured_centre", None)
 st.session_state.setdefault("calibration_confirmed", False)
 st.session_state.setdefault("calibration_diagnostic_path", None)
@@ -1067,14 +1067,20 @@ with st.sidebar:
                  "this on unless you are supplying your own mask that already "
                  "covers it.",
         )
-        fill_qxy_gap = st.checkbox(
-            "Cosmetically close the gap at q_xy = 0 (off by default)",
-            key="fill_qxy_gap",
-            help="Paints over the empty stripe at q_xy = 0 by mirroring the "
-                 "measured side across it. Off by default: once the beamstop "
-                 "is masked the gap is wide (tens of bins), and anything put "
-                 "there is invented rather than measured. Turn it on only for "
-                 "a presentation figure, and say so in the caption.",
+        mask_detector_gaps = st.checkbox(
+            "Also mask the detector's module gaps", key="mask_detector_gaps",
+            help="Off by default. A Pilatus is tiled, and pyFAI replaces its "
+                 "own detector mask with whatever mask it is given, so the "
+                 "gaps are left unmasked here and their zero counts average "
+                 "into bins that straddle one. Measured cost: peak positions "
+                 "move at most 0.25%, widths are unchanged, and only the few "
+                 "bins sitting directly on a gap read low, by up to 8%. In "
+                 "exchange the 2D map stays continuous instead of being ruled "
+                 "with black bands. Turn this on if you would rather see the "
+                 "gaps as holes and have every surviving bin exact. The "
+                 "beamstop is always masked either way — that one is 500x "
+                 "attenuation across the out-of-plane sector, not a few "
+                 "percent.",
         )
 
 
@@ -1603,7 +1609,9 @@ with tab_2d:
                     # Always through combine_masks with the detector: handing
                     # pyFAI any explicit mask replaces its detector mask
                     # rather than adding to it.
-                    mask = gc.combine_masks(mask, _bs, detector=fi.detector)
+                    mask = gc.combine_masks(
+                        mask, _bs,
+                        detector=fi.detector if mask_detector_gaps else None)
 
                     (unit_ip, unit_oop, unit_chi, unit_qtot), angle_deg = units_for_file(
                         get_unit_fiber, uf.name, verbose=False
@@ -1629,8 +1637,6 @@ with tab_2d:
                     res_I, res_qx, res_qy = res2d[0:3]
                     res_qx = -np.flip(res_qx)
                     res_I = np.flip(res_I, axis=1)
-                    if fill_qxy_gap:
-                        res_I, _gap = gc.fill_qxy_gap(res_I, res_qx)
 
                     sectors = [(-90, -80), (-8, 8)]
                     for pair in extra_sector_text.split(","):

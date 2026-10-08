@@ -2302,6 +2302,80 @@ def find_beamstop_mask(image, beam_col, rel_threshold: float = 0.30,
     return mask
 
 
+def box_cut(intensity, qx, qy, along: str = "qz",
+             across_range=(0.03, 0.12), along_range=None,
+             as_qtotal: bool = True):
+    """Line cut from a fixed strip of the remapped map, not an angular wedge.
+
+    A chi wedge opens linearly with q, so it integrates a narrow band at
+    low q and a wide one at high q. That is the wrong shape for two
+    common jobs at once. Near the origin the wedge is narrower than the
+    beamstop, so it returns nothing at all below the q where it finally
+    clears the stop. Far out it is wide enough to average across
+    orientation, which smears the higher orders of a lamellar series --
+    the very thing a (001)/(002)/(003) series is measured to resolve.
+
+    A strip of constant width does neither. It passes beside the beamstop
+    all the way down to q = 0, and its angular acceptance SHRINKS as q
+    grows, so high orders come out sharper than the wedge gives. On the
+    dataset this was written for, a q_xy strip of 0.03-0.12 reached
+    q_z = 0.001 (against 0.245 for a +-8 deg wedge) while narrowing (002)
+    from 0.074 to 0.067 and (003) from 0.075 to 0.071 -- where widening
+    the wedge to +-20 deg instead blew (002) out to 0.101.
+
+    along:  "qz" for an out-of-plane profile from a q_xy strip,
+            "qxy" for an in-plane profile from a q_z strip.
+    across_range:  (lo, hi) on the OTHER axis, as |q|, so a q_xy strip
+            takes both sides of the beam and averages them.
+    as_qtotal:  report the abscissa as |q| = sqrt(along^2 + mean_across^2)
+            rather than the bare along-axis value. A strip sits at a fixed
+            offset from the axis, so its peaks appear at a slightly lower
+            along-axis value than the same peak in a wedge; this puts the
+            two on the same scale. Set False to get the raw axis value.
+
+    Returns (q, intensity) with empty rows dropped.
+    """
+    I = np.asarray(intensity, dtype=float)
+    qx = np.asarray(qx, dtype=float)
+    qy = np.asarray(qy, dtype=float)
+    lo, hi = float(across_range[0]), float(across_range[1])
+    if hi <= lo:
+        _raise_error(f"box_cut: across_range must be increasing, got {across_range}.")
+
+    if along == "qz":
+        sel = (np.abs(qx) >= lo) & (np.abs(qx) <= hi)
+        band = I[:, sel]
+        axis_q = qy
+        across_vals = np.abs(qx[sel])
+    elif along == "qxy":
+        sel = (np.abs(qy) >= lo) & (np.abs(qy) <= hi)
+        band = I[sel, :].T
+        axis_q = qx
+        across_vals = np.abs(qy[sel])
+    else:
+        _raise_error(f"box_cut: along must be 'qz' or 'qxy', got {along!r}.")
+
+    if band.size == 0 or sel.sum() == 0:
+        _raise_error(
+            f"box_cut: no bins fall in |q| = {lo}-{hi} 1/A on the across "
+            f"axis. Check the range against the map's actual extent."
+        )
+
+    good = np.isfinite(band) & (band > 0)
+    n = good.sum(axis=1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        prof = np.where(n > 0, np.where(good, band, 0.0).sum(axis=1) / np.maximum(n, 1), np.nan)
+
+    keep = np.isfinite(prof) & (axis_q > 0)
+    if along_range is not None:
+        keep &= (axis_q >= float(along_range[0])) & (axis_q <= float(along_range[1]))
+    q_out = axis_q[keep]
+    if as_qtotal:
+        mean_across = float(np.mean(across_vals))
+        q_out = np.hypot(q_out, mean_across)
+    return q_out, prof[keep]
+
+
 def linecut_drop_empty_bins(result):
     """Return (q, intensity) with bins no pixel ever reached removed.
 
@@ -2334,14 +2408,27 @@ def linecut_drop_empty_bins(result):
 def combine_masks(*masks, detector=None, shape=None):
     """OR together any masks that are present (None entries skipped).
 
-    ALWAYS pass `detector` when the result will go to pyFAI. pyFAI's
-    create_mask() reads `if mask is None: mask = self.mask` -- an explicit
-    mask REPLACES the detector's own mask rather than adding to it. So
-    handing pyFAI a beamstop mask without the detector mask folded in
-    silently un-masks every module gap and known bad pixel: on a Pilatus
-    2M that gives back 197,365 pixels in order to mask 12,279. The gaps
-    then average in as zero intensity, which is the exact failure the
-    beamstop mask exists to prevent.
+    `detector` folds in the detector's own mask -- the module gaps and
+    known bad pixels. Know what that choice does before making it,
+    because pyFAI's create_mask() reads `if mask is None: mask =
+    self.mask`: an explicit mask REPLACES the detector's rather than
+    adding to it. So passing any mask without `detector` silently leaves
+    the module gaps unmasked, and their zero counts are averaged into
+    every bin that straddles one.
+
+    Leaving them unmasked is nonetheless a reasonable default here, and
+    it is what this toolkit does. Measured on a Pilatus 2M at npt = 900,
+    against the same cut with the gaps masked: peak positions move by at
+    most 0.25%, widths are unchanged, and the intensity ratio has median
+    1.0000 with a 5th percentile of 1.0000 -- only the handful of bins
+    sitting directly on a gap read low, by at most 8%. In exchange the
+    2D map stays continuous instead of being ruled with black bands,
+    which otherwise have to be interpolated back over for any figure --
+    and an interpolator wide enough to close them cannot reliably be
+    kept out of the missing wedge, which must stay visible.
+
+    The beamstop is a different matter and is always masked: it is 500x
+    attenuation over the out-of-plane sector, not a few percent.
 
     Returns an int8 array in pyFAI's convention (nonzero = excluded), or
     None when nothing is masked, so callers can pass it straight through.
@@ -2479,73 +2566,6 @@ def autodefine_beam_centre(image, incident_angle_deg: float, dist: float,
         "horizon_agreement": agreement, "horizon_blocks": n_blocks,
         "notes": notes,
     }
-
-
-def fill_qxy_gap(intensity, qx, max_width: int = 12):
-    """Close the thin beamstop gap at q_xy = 0 in a remapped map.
-
-    The beamstop leaves a narrow empty stripe at q_xy = 0 that a reader
-    sees as a line ruled down the middle of the figure. A fibre-textured
-    GI map is symmetric about q_xy = 0, so mirror the measured side across
-    the gap, and interpolate across wherever the mirror is empty too.
-
-    Done row by row, because the stripe is not a constant width: the
-    beamstop subtends more bins near the origin than far from it, so a
-    column-wise rule would leave the widest, most visible part of it
-    unfilled.
-
-    This is cosmetic and deliberately timid. Per row it fills only a gap
-    that straddles q_xy = 0, is bounded by measured data on BOTH sides,
-    and is no wider than `max_width` bins. The missing wedge is far wider
-    than that at every height, so it can never be painted over -- it is
-    genuinely unmeasured and has to stay visible.
-
-    Returns (filled_intensity, (q_lo, q_hi)) where the q pair brackets the
-    widest row that was filled, or (intensity, None) if nothing was.
-    """
-    I = np.array(intensity, dtype=float, copy=True)
-    qx = np.asarray(qx, dtype=float)
-    n = qx.size
-    j0 = int(np.argmin(np.abs(qx)))
-    # mirror index for every column, precomputed
-    mirror = np.abs(qx[:, None] + qx[None, :]).argmin(axis=1)
-
-    widest = -1
-    span = None
-    for r in range(I.shape[0]):
-        row = I[r]
-        dead = ~np.isfinite(row) | (row <= 0)
-        if not dead[j0]:
-            continue
-        lo = j0
-        while lo - 1 >= 0 and dead[lo - 1]:
-            lo -= 1
-        hi = j0
-        while hi + 1 < n and dead[hi + 1]:
-            hi += 1
-        width = hi - lo + 1
-        if width > max_width or lo == 0 or hi == n - 1:
-            continue
-        for j in range(lo, hi + 1):
-            jm = int(mirror[j])
-            if lo <= jm <= hi:
-                continue
-            v = row[jm]
-            if np.isfinite(v) and v > 0:
-                row[j] = v
-        still = ~np.isfinite(row[lo:hi + 1]) | (row[lo:hi + 1] <= 0)
-        if still.any():
-            a, b = row[lo - 1], row[hi + 1]
-            w = np.linspace(0.0, 1.0, width + 2)[1:-1]
-            for k, j in enumerate(range(lo, hi + 1)):
-                if still[k]:
-                    row[j] = a * (1.0 - w[k]) + b * w[k]
-        if width > widest:
-            widest = width
-            span = (float(qx[lo]), float(qx[hi]))
-    if span is None:
-        return intensity, None
-    return I, span
 
 
 def add_angle_lines(ax, qip, qoop, angles: Tuple[float, float], color="cyan"):

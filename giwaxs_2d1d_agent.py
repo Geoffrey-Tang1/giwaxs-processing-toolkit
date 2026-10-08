@@ -140,13 +140,15 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                          "this when the calibrant was taken in a different "
                          "detector position -- a case a calibrant fit cannot "
                          "detect, since it reports a fine residual anyway.")
-    p.add_argument("--fill-qxy-gap", action="store_true",
-                    help="Cosmetically close the gap at q_xy = 0 by mirroring "
-                         "the measured side across it. OFF by default: once "
-                         "the beamstop is masked the gap is tens of bins wide, "
-                         "and anything placed there is invented rather than "
-                         "measured. For a presentation figure only, and say so "
-                         "in the caption.")
+    p.add_argument("--mask-detector-gaps", action="store_true",
+                    help="Also mask the detector's module gaps. Off by "
+                         "default: pyFAI replaces its own detector mask with "
+                         "whatever mask it is given, so leaving them unmasked "
+                         "keeps the 2D map continuous instead of ruled with "
+                         "black bands. Measured cost -- peak positions move at "
+                         "most 0.25%%, widths unchanged, and only the few bins "
+                         "sitting directly on a gap read low, by up to 8%%. "
+                         "The beamstop is always masked either way.")
     p.add_argument("--no-colorbar", dest="show_colorbar", action="store_false",
                     help="Leave the intensity colour bar off the saved image. "
                          "Useful when the figure will carry its scale "
@@ -307,7 +309,8 @@ def process_file(tiff_path: str, fi, get_unit_fiber, mask, args, out_dirs, fabio
                   f"({100 * bs.mean():.2f}% of the detector)")
     # Always through combine_masks with the detector: handing pyFAI any
     # explicit mask replaces its detector mask rather than adding to it.
-    file_mask = gc.combine_masks(mask, bs, detector=fi.detector)
+    file_mask = gc.combine_masks(
+        mask, bs, detector=fi.detector if args.mask_detector_gaps else None)
 
     # --- 2D remap into (q_ip, q_oop) space ------------------------------------
     res2d = fi.integrate2d_grazing_incidence(
@@ -319,8 +322,6 @@ def process_file(tiff_path: str, fi, get_unit_fiber, mask, args, out_dirs, fabio
     res_I, res_qx, res_qy = res2d[0:3]
     res_qx = -np.flip(res_qx)
     res_I = np.flip(res_I, axis=1)
-    if args.fill_qxy_gap:
-        res_I, _gap = gc.fill_qxy_gap(res_I, res_qx)
 
     img_out_path = os.path.join(out_dirs["images"], f"{base}_2D_GIWAXS.png")
     gc.plot_2d_image(
