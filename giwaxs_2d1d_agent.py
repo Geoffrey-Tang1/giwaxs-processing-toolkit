@@ -409,9 +409,11 @@ def _main_impl(argv: Optional[List[str]] = None):
     # confirmation is valuable even in an otherwise-scripted run.
     gc.prompt_for_calibration_setup(args)
 
-    fi, detector = gc.build_fiber_integrator(args, Detector, detector_factory, FiberIntegrator, fabio=fabio)
-
     first_shape = fabio.open(tiff_files[0]).data.shape
+    fi, detector = gc.build_fiber_integrator(
+        args, Detector, detector_factory, FiberIntegrator,
+        fabio=fabio, image_shape=first_shape)
+
     mask = gc.load_mask(args, fabio, first_shape)
 
     # Determine the full list of angular sectors up-front (defaults + CLI extras

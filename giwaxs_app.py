@@ -77,8 +77,18 @@ st.session_state.setdefault("2d_color_scale", "log")           # 2D image colorb
 st.session_state.setdefault("pf_tick_spacing", 20.0)           # pole figure chi axis, deg
 st.session_state.setdefault("processed_2d", None)   # cached heavy-computation results
 st.session_state.setdefault("processed_pf", None)
+# The refined geometry is kept as ONE complete object -- detector,
+# wavelength, distance, PONI, rotations together -- rather than written
+# back into the individual manual-entry widgets. Writing it back was the
+# old behaviour and it silently lost the calibration two ways: the "use
+# .poni" checkbox stayed ticked so build_geometry() went on reading the
+# un-refined .poni, and the wavelength was never written back at all, so
+# unticking the box processed everything at the default Cu K-alpha
+# instead of the beamline's actual wavelength.
+st.session_state.setdefault("active_geometry", None)
 st.session_state.setdefault("calibration_confirmed", False)
 st.session_state.setdefault("calibration_diagnostic_path", None)
+st.session_state.setdefault("calibration_rms_px", None)
 st.session_state.setdefault("_2d_zip_path", None)
 st.session_state.setdefault("_pf_zip_path", None)
 st.session_state.setdefault("_2d_plot_png_cache", {})
@@ -452,6 +462,27 @@ def _upload_scratch_dir() -> str:
     return tempfile.mkdtemp(prefix="giwaxs_uploads_")
 
 
+def _active_geometry():
+    """The refined geometry, or None.
+
+    Guards against a stored entry that is incomplete -- a session
+    restored from an older version of the app, or one whose detector
+    object did not survive. A geometry that cannot be used is dropped
+    rather than allowed to crash the page on render; the .poni and
+    manual entries then take over as they did before.
+    """
+    g = st.session_state.get("active_geometry")
+    if not g:
+        return None
+    needed = ("dist", "poni1", "poni2", "rot1", "rot2", "rot3",
+              "wavelength", "detector")
+    det = g.get("detector")
+    if any(g.get(k) is None for k in needed) or not hasattr(det, "pixel1"):
+        st.session_state["active_geometry"] = None
+        return None
+    return g
+
+
 def save_upload_to_temp(uploaded_file) -> str:
     """Materialise an uploaded file on disk (pyFAI/fabio need a real path)
     at a DETERMINISTIC location derived from its name and size, rewriting
@@ -681,6 +712,22 @@ with st.sidebar:
     )
 
     st.header("2. Geometry")
+    _active = _active_geometry()
+    if _active is not None:
+        st.info(
+            f"**A refined geometry is in use** (from {_active['source']}).\n\n"
+            f"Distance {_active['dist']:.6f} m · beam centre "
+            f"({_active['poni1']/_active['detector'].pixel1:.1f}, "
+            f"{_active['poni2']/_active['detector'].pixel2:.1f}) px · "
+            f"wavelength {_active['wavelength']*1e10:.4f} Å\n\n"
+            f"It overrides the .poni and the manual entries below."
+        )
+        if st.button("Discard it and use the settings below instead",
+                      key="clear_active_geometry"):
+            st.session_state["active_geometry"] = None
+            st.session_state["calibration_confirmed"] = False
+            st.rerun()
+
     use_poni_file = st.checkbox(
         "Load geometry from an existing .poni file", key="use_poni_file",
         help="Loads beam centre, distance, rotations, wavelength, AND the "
@@ -803,6 +850,28 @@ with st.sidebar:
                     # the script on the NEXT run (before those widgets are
                     # instantiated again) -- see the "pending calibration
                     # update" block near the top of this file.
+                    # Keep the refined geometry whole, and keep the
+                    # wavelength with it -- it belongs to the same
+                    # measurement as the distance and the PONI, and
+                    # separating them is how a 1.86x error in every q
+                    # value gets in.
+                    st.session_state["active_geometry"] = {
+                        "dist": result["dist"],
+                        "poni1": result["poni1"],
+                        "poni2": result["poni2"],
+                        "rot1": result["rot1"],
+                        "rot2": result["rot2"],
+                        "rot3": result["rot3"],
+                        "wavelength": wl,
+                        "detector": detector,
+                        "source": agbeh_upload.name,
+                        "rms_residual_px": result.get("rms_residual_px"),
+                        "centre_mismatch_px": result.get("centre_mismatch_px"),
+                        "guess_replaced": result.get("guess_replaced", False),
+                    }
+                    # Mirror into the manual boxes too, so the numbers are
+                    # visible and editable -- but they are no longer what
+                    # the processing reads.
                     st.session_state["_pending_calibration_update"] = {
                         "beam_center_y": result["poni1"] / detector.pixel1,
                         "beam_center_x": result["poni2"] / detector.pixel2,
@@ -811,10 +880,20 @@ with st.sidebar:
                         "rot2": result["rot2"],
                         "rot3": result["rot3"],
                     }
+                    for _note in result.get("notes", []):
+                        st.info(_note)
+                    _rms = result.get("rms_residual_px")
+                    if _rms is not None and _rms == _rms:
+                        st.success(
+                            f"Calibration fit: rings matched to within "
+                            f"{_rms:.2f} px (RMS) using "
+                            f"{result['n_control_points']} control points."
+                        )
                     st.session_state["calibration_confirmed"] = True
                     st.session_state["calibration_diagnostic_path"] = result.get("diagnostic_path")
                     st.session_state["calibration_chi2"] = (result["init_chi2"], result["final_chi2"])
                     st.session_state["calibration_n_points"] = result["n_control_points"]
+                    st.session_state["calibration_rms_px"] = result.get("rms_residual_px")
                     st.rerun()
                 except Exception as exc:
                     st.error(f"Calibration failed: {exc}")
@@ -823,9 +902,14 @@ with st.sidebar:
             chi2_before, chi2_after = st.session_state["calibration_chi2"]
             st.image(
                 st.session_state["calibration_diagnostic_path"],
-                caption=f"Fit check ({st.session_state['calibration_n_points']} ring points, "
-                        f"chi2: {chi2_before:.4g} -> {chi2_after:.4g}). Dots = detected ring "
-                        f"points, green lines = fitted rings -- should overlap closely.",
+                caption=(
+                    f"Fit check — {st.session_state['calibration_n_points']} ring points, "
+                    + (f"rings matched to within "
+                        f"{st.session_state['calibration_rms_px']:.2f} px (RMS). "
+                        if st.session_state.get("calibration_rms_px") is not None
+                        else f"chi2 {chi2_before:.4g} -> {chi2_after:.4g}. ")
+                    + "Dots = detected ring points, green lines = fitted rings "
+                      "— they should overlap closely."),
                 width='stretch',
             )
             if st.session_state.get("calibration_confirmed"):
@@ -875,7 +959,24 @@ def build_geometry():
         )
 
     try:
-        if use_poni_file:
+        active = _active_geometry()
+        if active is not None:
+            # A refined geometry outranks whatever is in the .poni box or
+            # the manual boxes: it was measured against this experiment's
+            # own calibrant image, and it is the whole geometry including
+            # the wavelength.
+            detector = active["detector"]
+            wl = active["wavelength"]
+            dist = active["dist"]
+            poni1, poni2 = active["poni1"], active["poni2"]
+            r1, r2, r3 = active["rot1"], active["rot2"], active["rot3"]
+            st.sidebar.success(
+                f"Using the geometry refined from {active['source']}: "
+                f"beam centre = ({poni1/detector.pixel1:.1f}, "
+                f"{poni2/detector.pixel2:.1f}) px, distance = {dist:.6f} m, "
+                f"wavelength = {wl*1e10:.4f} A"
+            )
+        elif use_poni_file:
             if poni_upload is None:
                 return None, None, None, fabio, "Please upload a .poni file."
             poni_path = save_upload_to_temp(poni_upload)
@@ -918,6 +1019,23 @@ def build_geometry():
         # beam_center_y/x, distance, rot1-3 are currently set to (whether
         # typed manually, loaded from a .poni, or refined via Calibrate)
         # are used directly as-is.
+
+        # Validate before any q is computed. The detector-shape check is
+        # the one that matters most here: a .poni from another setup maps
+        # every pixel to the wrong q without raising anything at all.
+        img_shape = None
+        if uploaded_files:
+            try:
+                img_shape = fabio.open(
+                    save_upload_to_temp(uploaded_files[0])).data.shape
+            except Exception:
+                img_shape = None          # unreadable file is reported later
+        problems = gc.validate_geometry(detector, dist, poni1, poni2, wl,
+                                         image_shape=img_shape, strict=False)
+        if problems:
+            return None, None, None, fabio, (
+                "This geometry cannot be used with these images:\n\n- "
+                + "\n- ".join(problems))
 
         fi = FiberIntegrator(dist=dist, poni1=poni1, poni2=poni2,
                               rot1=r1, rot2=r2, rot3=r3, wavelength=wl, detector=detector)

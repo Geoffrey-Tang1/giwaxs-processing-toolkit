@@ -830,11 +830,328 @@ def plot_calibration_diagnostic(calib_img, cp, refined_geom, calibrant, out_path
     plt.close(fig)
 
 
+def _radial_profile(values, radii, nbins, rmax, min_count=None):
+    """Azimuthal mean of `values` binned by `radii`. Bins fed by too few
+    pixels come back as NaN rather than as noise.
+
+    min_count scales with how many pixels there actually are: a fixed
+    threshold that is sensible at full resolution rejects almost every
+    bin on a decimated copy, which silently turns the whole profile into
+    NaN and makes any score computed from it meaningless.
+    """
+    b = (radii * (nbins / rmax)).astype(np.int32)
+    keep = b < nbins
+    total = np.bincount(b[keep], weights=values[keep], minlength=nbins)
+    count = np.bincount(b[keep], minlength=nbins)
+    if min_count is None:
+        min_count = max(4, int(0.15 * keep.sum() / max(nbins, 1)))
+    prof = np.where(count >= min_count, total / np.maximum(count, 1), np.nan)
+    return prof, (np.arange(nbins) + 0.5) * rmax / nbins
+
+
+def _ring_sharpness(vx, vy, vv, cx, cy, rmax, min_fraction=0.25):
+    """How ring-like the image looks about (cx, cy).
+
+    Azimuthally average about the candidate centre and take the total
+    variation of that profile. Concentric rings only average coherently
+    about their own centre: anywhere else they smear out and the profile
+    flattens, so this peaks sharply at the true centre and needs no
+    initial guess at all.
+
+    The profile is lightly smoothed first, because total variation counts
+    bin-to-bin noise just as happily as it counts real rings, and a
+    candidate centre with sparser sampling would otherwise score on its
+    noise. Candidates whose profile is mostly empty score -1 so they can
+    never win.
+    """
+    r = np.hypot(vx - cx, vy - cy)
+    m = r < rmax
+    if m.sum() < 2000:
+        return -1.0
+    nbins = max(32, int(rmax))
+    prof, _ = _radial_profile(vv[m], r[m], nbins, rmax)
+    finite = np.isfinite(prof)
+    if finite.sum() < min_fraction * nbins:
+        return -1.0
+    p = prof[finite]
+    if p.size > 5:                      # 3-bin box smooth, NaN-free by now
+        k = np.ones(3) / 3.0
+        p = np.convolve(p, k, mode="valid")
+    return float(np.abs(np.diff(p)).sum())
+
+
+def find_beam_centre_from_rings(calib_img, search_margin: float = 0.25,
+                                 coarse_step: int = 8):
+    """Locate the beam centre of a calibrant image WITHOUT any geometry.
+
+    Returns (col, row, sharpness). The centre may legitimately fall
+    outside the detector -- an offset or grazing-incidence setup often
+    puts the direct beam just off the active area -- so the search box
+    extends beyond the image by `search_margin`.
+
+    Multi-resolution: a coarse sweep on a heavily decimated copy, then a
+    local pattern search at successively finer decimation. The coarse
+    pass is what makes this affordable; a full-resolution sweep over the
+    same box would be orders of magnitude more work for the same answer.
+    """
+    h, w = calib_img.shape
+    good = np.isfinite(calib_img) & (calib_img > 0)
+    logi = np.log10(np.where(good, calib_img, 1.0) + 1.0)
+    rmax_full = float(np.hypot(h, w))
+
+    cache = {}
+
+    def points(step):
+        if step not in cache:
+            gs = good[::step, ::step]
+            ys, xs = np.nonzero(gs)
+            cache[step] = (xs.astype(np.float64), ys.astype(np.float64),
+                            logi[::step, ::step][gs])
+        return cache[step]
+
+    # --- coarse sweep -----------------------------------------------------
+    vx, vy, vv = points(coarse_step)
+    mx, my = w * search_margin, h * search_margin
+    best = (-1.0, 0.0, 0.0)
+    for cy in np.linspace(-my, h + my, 40) / coarse_step:
+        for cx in np.linspace(-mx, w + mx, 40) / coarse_step:
+            s = _ring_sharpness(vx, vy, vv, cx, cy, rmax_full / coarse_step)
+            if s > best[0]:
+                best = (s, cx, cy)
+    _, bx, by = best
+    bx, by = bx * coarse_step, by * coarse_step
+
+    # --- refine, halving the decimation as we go --------------------------
+    step = coarse_step
+    while True:
+        vx, vy, vv = points(step)
+        cx, cy = bx / step, by / step
+        rmax = rmax_full / step
+        s0 = _ring_sharpness(vx, vy, vv, cx, cy, rmax)
+        delta = max(2.0, coarse_step * 1.5 / step)
+        while delta >= 0.25:
+            improved = False
+            for dy in (-delta, 0.0, delta):
+                for dx in (-delta, 0.0, delta):
+                    if dx == 0.0 and dy == 0.0:
+                        continue
+                    s = _ring_sharpness(vx, vy, vv, cx + dx, cy + dy, rmax)
+                    if s > s0:
+                        s0, cx, cy, improved = s, cx + dx, cy + dy, True
+            if not improved:
+                delta /= 2.0
+        bx, by = cx * step, cy * step
+        if step == 1:
+            return float(bx), float(by), float(s0)
+        step //= 2
+
+
+def _fit_order_comb(radii, weights, max_peaks: int = 20,
+                     rel_prominence: float = 0.02, tol: float = 0.1):
+    """Given ring radii, find the fundamental spacing they are multiples of.
+
+    Diffraction orders of a lamellar calibrant sit at very nearly integer
+    multiples of the first-order radius, so sweeping a candidate
+    fundamental and scoring how closely every peak lands on an integer
+    multiple recovers the right spacing even when the first orders are
+    hidden behind the beamstop and some detected peaks belong to other
+    phases entirely.
+
+    Two things this has to get right:
+
+    * Only the strong peaks are evidence. A real frame throws up dozens of
+      weak maxima at large radii; insisting that a majority of ALL of them
+      fit a comb means no comb ever fits.
+    * Half the true spacing always scores at least as well as the spacing
+      itself, because every multiple of r1 is also a multiple of r1/2. So
+      among candidates that explain the peaks about equally well, take the
+      LARGEST -- otherwise the orders come out doubled and the distance
+      comes out halved.
+    """
+    radii = np.asarray(radii, float)
+    weights = np.asarray(weights, float)
+    if len(radii) < 3:
+        return None
+
+    cut = rel_prominence * weights.max()
+    sel = weights >= cut
+    if sel.sum() >= 4:
+        radii, weights = radii[sel], weights[sel]
+    order = np.argsort(-weights)[:max_peaks]
+    radii, weights = radii[order], weights[order]
+    idx = np.argsort(radii)
+    radii, weights = radii[idx], weights[idx]
+
+    lo = max(1.0, 0.04 * radii.min())
+    hi = 1.1 * radii.min()
+    cands = np.linspace(lo, hi, 6000)
+    scores = np.full(cands.size, -np.inf)
+    for i, c in enumerate(cands):
+        k = radii / c
+        frac = np.abs(k - np.round(k))
+        on = (frac < tol) & (np.round(k) >= 1)
+        if on.sum() < max(3, int(0.5 * len(radii))):
+            continue
+        scores[i] = float((weights[on] * (1.0 - frac[on] / tol)).sum())
+    if not np.isfinite(scores).any():
+        return None
+    best = scores.max()
+    # among candidates that explain the peaks about as well, the largest
+    # spacing is the fundamental; the smaller ones are its sub-harmonics
+    near = cands[scores >= 0.95 * best]
+    return float(near.max())
+
+
+def estimate_geometry_from_rings(calib_img, pixel_size: float, wavelength: float,
+                                  calibrant_dspacing: float,
+                                  beam_centre=None) -> Dict[str, object]:
+    """Derive the beam centre AND the sample-detector distance from a
+    calibrant image alone -- no initial guess required.
+
+    This exists because pyFAI's control-point extraction searches for ring
+    points NEAR where the supplied geometry predicts them. Hand it a guess
+    that is far off and it attaches the detected points to the wrong ring
+    orders; the refinement then converges to a geometry that is perfectly
+    self-consistent with those wrong labels and reports no error at all.
+    Deriving the starting point from the data removes that failure mode
+    instead of asking the user to avoid it.
+
+    wavelength and calibrant_dspacing are both in metres and Angstrom
+    respectively -- i.e. wavelength in m (as pyFAI uses) and d in A (as
+    calibrant tables list).
+
+    Returns a dict with beam_centre_col/row (pixels), dist (m),
+    first_order_px, ring_radii_px, n_rings, rms_residual_px and sharpness.
+    rms_residual_px is the headline number: on a good calibrant frame it
+    is well under a pixel.
+    """
+    lam_A = wavelength * 1e10
+    h, w = calib_img.shape
+
+    if beam_centre is None:
+        cx, cy, sharp = find_beam_centre_from_rings(calib_img)
+    else:
+        cx, cy = float(beam_centre[0]), float(beam_centre[1])
+        good = np.isfinite(calib_img) & (calib_img > 0)
+        ys, xs = np.nonzero(good)
+        sharp = _ring_sharpness(xs.astype(float), ys.astype(float),
+                                 np.log10(calib_img[good] + 1.0), cx, cy,
+                                 float(np.hypot(h, w)))
+
+    # --- radial profile about that centre ---------------------------------
+    good = np.isfinite(calib_img) & (calib_img > 0)
+    yy, xx = np.mgrid[0:h, 0:w]
+    r = np.hypot(xx - cx, yy - cy)[good]
+    v = np.log10(calib_img[good] + 1.0)
+    rmax = float(np.hypot(h, w))
+    nbins = int(rmax)
+    prof, rr = _radial_profile(v, r, nbins, rmax)
+    finite = np.isfinite(prof)
+    if finite.sum() < 50:
+        raise GiwaxsError("Could not build a radial profile from this image -- "
+                          "too few usable pixels.")
+
+    # Background window must be MUCH wider than the ring spacing: a window
+    # comparable to it tracks the rings themselves and the detrended
+    # profile then shows spurious peaks half way between the real ones.
+    from scipy.ndimage import uniform_filter1d
+    filled = np.where(finite, prof, float(np.nanmedian(prof)))
+    detrended = np.where(finite, prof - uniform_filter1d(filled, 201), -9.0)
+
+    from scipy.signal import find_peaks
+    pk, props = find_peaks(detrended, prominence=0.006, distance=15)
+    radii = rr[pk]
+    prom = props["prominences"]
+    keep = radii > 0.02 * rmax           # ignore the beamstop halo
+    radii, prom = radii[keep], prom[keep]
+    if len(radii) < 3:
+        raise GiwaxsError(
+            "Fewer than three calibrant rings could be found in this image. "
+            "Check that it really is a calibrant exposure and that the "
+            "calibrant name is right."
+        )
+
+    fundamental = _fit_order_comb(radii, prom)
+    if fundamental is None:
+        raise GiwaxsError(
+            "Could not work out the spacing between the calibrant rings. "
+            "Check that this really is a calibrant exposure and that the "
+            "calibrant name matches it."
+        )
+
+    # --- solve the distance from the ring positions ------------------------
+    from scipy.optimize import least_squares
+
+    def predict(dist_m, nn):
+        s = np.clip(np.asarray(nn, float) * lam_A / (2.0 * calibrant_dspacing),
+                    -1.0, 1.0)
+        return dist_m * np.tan(2.0 * np.arcsin(s)) / pixel_size
+
+    dist = fundamental * pixel_size / np.tan(
+        2.0 * np.arcsin(np.clip(lam_A / (2.0 * calibrant_dspacing), -1, 1)))
+
+    # Match PREDICTED ring positions to detected peaks, not the other way
+    # round, and tighten the acceptance window each pass.
+    #
+    # Assigning an order to every detected peak is what goes wrong on a
+    # real frame: a strong peak that is not this calibrant (another phase,
+    # the substrate) sits near some order, gets claimed as that order, and
+    # drags the distance by percent. Going the other way, each order may
+    # claim at most one peak and only if it is close enough -- so as the
+    # window shrinks, a near-miss impostor is dropped in favour of the
+    # real ring once the distance is good enough to tell them apart.
+    matched_n = np.array([], int)
+    matched_r = np.array([], float)
+    for tol_frac in (0.30, 0.12, 0.05, 0.02):
+        n_max = max(2, int(rmax / max(fundamental, 1.0)) + 2)
+        ns = np.arange(1, n_max + 1)
+        pred = predict(dist, ns)
+        inside = pred < rmax
+        ns, pred = ns[inside], pred[inside]
+        take_n, take_r = [], []
+        for n, rp in zip(ns, pred):
+            gap = np.abs(radii - rp)
+            k = int(gap.argmin())
+            if gap[k] <= tol_frac * fundamental:
+                take_n.append(n)
+                take_r.append(radii[k])
+        if len(take_n) < 3:
+            break
+        matched_n = np.asarray(take_n, int)
+        matched_r = np.asarray(take_r, float)
+        fit = least_squares(
+            lambda p: predict(p[0], matched_n) - matched_r, [dist])
+        dist = float(fit.x[0])
+
+    if matched_n.size < 3:
+        raise GiwaxsError(
+            "Could not match enough calibrant rings to fit the "
+            "sample-detector distance."
+        )
+    resid = predict(dist, matched_n) - matched_r
+    radii, orders = matched_r, matched_n
+
+    return {
+        "beam_centre_col": float(cx),
+        "beam_centre_row": float(cy),
+        "dist": dist,
+        "first_order_px": float(predict(dist, np.array([1]))[0]),
+        "ring_radii_px": radii,
+        "ring_orders": orders,
+        "n_rings": int(len(radii)),
+        "rms_residual_px": float(np.sqrt((resid ** 2).mean())),
+        "sharpness": float(sharp),
+    }
+
 def run_agbeh_calibration(calib_path: str, detector, wavelength: float,
                            dist_guess: float, poni1_guess: float, poni2_guess: float,
                            rot1_guess: float, rot2_guess: float, rot3_guess: float,
                            calibrant_name: str, max_rings: int, imin: float,
-                           fabio_mod, diagnostic_path: Optional[str] = None) -> Dict[str, float]:
+                           fabio_mod, diagnostic_path: Optional[str] = None,
+                           auto_initial_guess: bool = True,
+                           max_centre_mismatch_px: float = 25.0,
+                           max_rms_residual_px: float = 3.0,
+                           strict: bool = True) -> Dict[str, float]:
     """Refine the beam centre / sample-detector distance against a calibrant
     (e.g. AgBeh) image, mirroring the notebook's calibration workflow:
     extract ring control points with pyFAI's SingleGeometry, then run its
@@ -859,6 +1176,44 @@ def run_agbeh_calibration(calib_path: str, detector, wavelength: float,
 
     calib_img = fabio_mod.open(calib_path).data
     calibrant = get_calibrant(calibrant_name, wavelength=wavelength)
+
+    pix1 = detector.pixel1
+    pix2 = detector.pixel2
+    notes = []
+
+    # --- an estimate that owes nothing to the supplied guess ----------------
+    # pyFAI's extract_cp looks for ring points NEAR where the supplied
+    # geometry predicts them. A guess that is far off makes it attach the
+    # points to the wrong ring orders, and the refinement then converges on
+    # a geometry that is perfectly self-consistent with those wrong labels
+    # and reports no error whatsoever. Deriving a starting point straight
+    # from the rings removes that failure mode rather than asking the user
+    # to avoid it, and doubles as the one check that can catch a converged
+    # but wrong fit, precisely because it shares no assumption with it.
+    estimate = None
+    try:
+        estimate = estimate_geometry_from_rings(
+            calib_img, pix1, wavelength, calibrant.dspacing[0])
+    except Exception as exc:                       # never fatal on its own
+        notes.append(f"Could not estimate the geometry from the rings "
+                     f"directly ({exc}); falling back to the supplied guess "
+                     f"alone.")
+
+    guess_replaced = False
+    if estimate is not None and auto_initial_guess:
+        gap = float(np.hypot(poni2_guess / pix2 - estimate["beam_centre_col"],
+                              poni1_guess / pix1 - estimate["beam_centre_row"]))
+        if gap > max_centre_mismatch_px:
+            notes.append(
+                f"The supplied beam centre is {gap:.0f} px from where the "
+                f"rings in this image actually are, which is too far for the "
+                f"ring finder to start from -- using the centre and distance "
+                f"measured from the image instead."
+            )
+            poni1_guess = estimate["beam_centre_row"] * pix1
+            poni2_guess = estimate["beam_centre_col"] * pix2
+            dist_guess = estimate["dist"]
+            guess_replaced = True
 
     initial_geom = Geometry(
         dist=dist_guess, poni1=poni1_guess, poni2=poni2_guess,
@@ -891,6 +1246,48 @@ def run_agbeh_calibration(calib_path: str, detector, wavelength: float,
 
     cfg = gr.get_config()
 
+    # --- how far off are the control points, in pixels? --------------------
+    # chi2 is the number the refinement minimises, but its units mean
+    # nothing to a person: 0.0034 looks small and was in fact a complete
+    # failure, while 3.4e-6 was a good fit. The radial residual is in
+    # detector pixels, so "41 px out" needs no interpretation and can be
+    # given a fixed threshold.
+    rms_residual_px = float("nan")
+    try:
+        pts = np.array(cp.getList())            # rows, cols, ring index
+        rows, cols, ring = pts[:, 0], pts[:, 1], pts[:, 2].astype(int)
+        tth_measured = gr.tth(rows, cols)
+        tth_ring = np.array(calibrant.get_2th())
+        valid = ring < len(tth_ring)
+        dtth = tth_measured[valid] - tth_ring[ring[valid]]
+        # angle -> pixels at the detector, exact for a flat normal detector
+        scale = cfg["dist"] / (np.cos(tth_measured[valid]) ** 2) / pix1
+        resid_px = dtth * scale
+        rms_residual_px = float(np.sqrt((resid_px ** 2).mean()))
+    except Exception as exc:
+        notes.append(f"Could not compute the fit residual in pixels ({exc}).")
+
+    # --- the independent cross-check ---------------------------------------
+    centre_mismatch_px = float("nan")
+    if estimate is not None:
+        centre_mismatch_px = float(np.hypot(
+            cfg["poni2"] / pix2 - estimate["beam_centre_col"],
+            cfg["poni1"] / pix1 - estimate["beam_centre_row"]))
+
+    problems = []
+    if np.isfinite(rms_residual_px) and rms_residual_px > max_rms_residual_px:
+        problems.append(
+            f"the fitted rings miss the detected ring points by "
+            f"{rms_residual_px:.1f} px on average (expected well under "
+            f"{max_rms_residual_px:.0f} px)")
+    if np.isfinite(centre_mismatch_px) and centre_mismatch_px > max_centre_mismatch_px:
+        problems.append(
+            f"the fitted beam centre is {centre_mismatch_px:.0f} px away from "
+            f"where the rings in this image actually are "
+            f"(fit: {cfg['poni2'] / pix2:.0f}, {cfg['poni1'] / pix1:.0f}; "
+            f"image: {estimate['beam_centre_col']:.0f}, "
+            f"{estimate['beam_centre_row']:.0f})")
+
     saved_diagnostic_path = None
     if diagnostic_path:
         try:
@@ -901,6 +1298,20 @@ def run_agbeh_calibration(calib_path: str, detector, wavelength: float,
             saved_diagnostic_path = diagnostic_path
         except Exception as exc:
             print(f"  (Could not generate calibration diagnostic plot: {exc})")
+
+    if problems and strict:
+        _raise_error(
+            "This calibration did not work: " + "; and ".join(problems) + ".\n\n"
+            "The usual cause is that the starting geometry describes a "
+            "different measurement than this calibrant image -- for example a "
+            ".poni saved from another experiment or another camera length. "
+            "What the image itself says: beam centre "
+            f"({(estimate or {}).get('beam_centre_col', float('nan')):.0f}, "
+            f"{(estimate or {}).get('beam_centre_row', float('nan')):.0f}) px, "
+            f"distance {(estimate or {}).get('dist', float('nan')):.4f} m. "
+            "Enter those as the geometry, or pass strict=False to accept the "
+            "fit anyway."
+        )
 
     return {
 
@@ -914,6 +1325,15 @@ def run_agbeh_calibration(calib_path: str, detector, wavelength: float,
         "final_chi2": final_chi2,
         "n_control_points": len(cp.getList()),
         "diagnostic_path": saved_diagnostic_path,
+        "rms_residual_px": rms_residual_px,
+        "centre_mismatch_px": centre_mismatch_px,
+        "guess_replaced": guess_replaced,
+        "fit_ok": not problems,
+        "problems": problems,
+        "notes": notes,
+        "image_centre_col": (estimate or {}).get("beam_centre_col"),
+        "image_centre_row": (estimate or {}).get("beam_centre_row"),
+        "image_dist": (estimate or {}).get("dist"),
     }
 
 
@@ -943,7 +1363,78 @@ def save_refined_poni(path: str, dist: float, poni1: float, poni2: float,
     geom.save(path)
 
 
-def build_fiber_integrator(args, Detector, detector_factory, FiberIntegrator, fabio=None):
+def validate_geometry(detector, dist: float, poni1: float, poni2: float,
+                      wavelength: float, image_shape=None,
+                      strict: bool = True) -> List[str]:
+    """Check that a geometry is physically usable, and that it belongs to
+    the images it is about to be applied to.
+
+    These are the checks whose absence lets a wrong answer through
+    silently. pyFAI will happily build a coordinate map from a geometry
+    that describes a different detector than the one that took the
+    picture: nothing raises, every q value is simply wrong. The same goes
+    for a wavelength left at a default from another beamline.
+
+    Returns the list of problems found (empty when all is well). With
+    strict=True a non-empty list is raised as a GiwaxsError instead,
+    which is the right default -- these are contradictions, not missing
+    optional settings, and continuing past them produces confident
+    nonsense rather than a visible failure.
+    """
+    problems: List[str] = []
+
+    det_shape = getattr(detector, "max_shape", None)
+    if image_shape is not None and det_shape is not None:
+        if tuple(image_shape) != tuple(det_shape):
+            problems.append(
+                f"The images are {image_shape[0]}x{image_shape[1]} pixels but "
+                f"the geometry declares a "
+                f"{getattr(detector, 'name', 'detector')} of "
+                f"{det_shape[0]}x{det_shape[1]}. These must match -- a "
+                f"geometry for a different detector maps every pixel to the "
+                f"wrong q."
+            )
+
+    lam_A = wavelength * 1e10 if wavelength else 0.0
+    if not (0.05 <= lam_A <= 20.0):
+        problems.append(
+            f"The wavelength is {lam_A:.4g} A ({wavelength:.4g} m), which is "
+            f"outside the range any X-ray scattering measurement uses "
+            f"(0.05-20 A). Check whether metres and Angstrom have been mixed up."
+        )
+
+    if not (1e-3 <= dist <= 1e2):
+        problems.append(
+            f"The sample-detector distance is {dist:.4g} m, which is not a "
+            f"plausible value (expected roughly 0.01-20 m)."
+        )
+
+    if det_shape is not None:
+        pix1 = getattr(detector, "pixel1", None) or 1.0
+        pix2 = getattr(detector, "pixel2", None) or 1.0
+        row, col = poni1 / pix1, poni2 / pix2
+        # A beam centre just off the active area is normal for an offset or
+        # grazing-incidence detector, so only a wild value is a problem.
+        margin = 2.0
+        if not (-margin * det_shape[0] <= row <= (1 + margin) * det_shape[0]) or \
+           not (-margin * det_shape[1] <= col <= (1 + margin) * det_shape[1]):
+            problems.append(
+                f"The beam centre works out at row {row:.0f}, column "
+                f"{col:.0f}, which is far outside a "
+                f"{det_shape[0]}x{det_shape[1]} detector. Check the PONI "
+                f"values and the pixel size."
+            )
+
+    if problems and strict:
+        _raise_error(
+            "This geometry cannot be used with these images:\n  - "
+            + "\n  - ".join(problems)
+        )
+    return problems
+
+
+def build_fiber_integrator(args, Detector, detector_factory, FiberIntegrator,
+                            fabio=None, image_shape=None):
     """Construct the pyFAI FiberIntegrator (geometry + detector) from CLI
     args, optionally refining the beam centre / distance first against an
     AgBeh (or other calibrant) image if one was provided (via --agbeh-file
@@ -1086,6 +1577,13 @@ def build_fiber_integrator(args, Detector, detector_factory, FiberIntegrator, fa
             print(f"  Saved refined geometry to: {os.path.abspath(args.save_calibrated_poni)}\n")
         else:
             print()
+
+    # Last gate before any q is computed. image_shape is optional only so
+    # that callers which genuinely have no image yet still work; every
+    # caller that has one should pass it, because the detector-mismatch
+    # check is the one that catches a .poni belonging to another setup.
+    validate_geometry(detector, dist, poni1, poni2, wavelength,
+                       image_shape=image_shape, strict=True)
 
     fi = FiberIntegrator(
         dist=dist,

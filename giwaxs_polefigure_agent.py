@@ -257,9 +257,11 @@ def _main_impl(argv: Optional[List[str]] = None):
 
     gc.prompt_for_calibration_setup(args)
 
-    fi, detector = gc.build_fiber_integrator(args, Detector, detector_factory, FiberIntegrator, fabio=fabio)
-
     first_shape = fabio.open(tiff_files[0]).data.shape
+    fi, detector = gc.build_fiber_integrator(
+        args, Detector, detector_factory, FiberIntegrator,
+        fabio=fabio, image_shape=first_shape)
+
     mask = gc.load_mask(args, fabio, first_shape)
 
     summary_path = None
