@@ -565,6 +565,29 @@ def save_upload_to_temp(uploaded_file) -> str:
     return path
 
 
+def linecut_tag(label: str) -> str:
+    """A filename- and widget-key-safe tag for one line cut.
+
+    Derived from the cut's LABEL, not its (lo, hi) tuple. A box cut and
+    the combined profile built from it carry the same bounds, so a tag
+    made from those collided: Streamlit refused the duplicate download
+    key outright, and the ZIP writer silently overwrote one cut's files
+    with the other's -- the quieter and worse of the two failures.
+    """
+    out = []
+    for ch in str(label):
+        if ch.isalnum():
+            out.append(ch)
+        elif ch in "-.":
+            out.append({"-": "m", ".": "p"}[ch])
+        else:
+            out.append("_")
+    tag = "".join(out).strip("_")
+    while "__" in tag:
+        tag = tag.replace("__", "_")
+    return tag or "cut"
+
+
 def stash_zip_to_disk(zip_bytes: bytes, tag: str) -> str:
     """Write a freshly-built ZIP to the scratch directory and return its
     path, so session_state holds a short string instead of the archive.
@@ -633,7 +656,7 @@ def build_2d_results_zip(qip_range, qoop_range) -> bytes:
             zf.writestr(f"{name}/{name}_2D_GIWAXS.png", img_buf.getvalue())
 
             for angles, q, intensity, lc_label in res["linecuts"]:
-                tag = f"{angles[0]}_{angles[1]}".replace("-", "m").replace(".", "p")
+                tag = linecut_tag(lc_label)
                 fig1d = gc.plot_1d_linecut(
                     q, intensity, out_path=None, angle_range=angles,
                     title=f"{name}: {lc_label}",
@@ -2015,9 +2038,9 @@ with tab_2d:
                 lc1, lc2 = st.columns([2, 1])
                 with lc1:
                     st.image(png_bytes_lc)
-                tag = f"{angles[0]}_{angles[1]}".replace("-", "m").replace(".", "p")
+                tag = linecut_tag(lc_label)
                 lc2.download_button(
-                    f"Download line cut {angles} PNG", png_bytes_lc,
+                    f"Download {lc_label} PNG", png_bytes_lc,
                     file_name=f"{res['name']}_lineprofile_{tag}.png", mime="image/png",
                     key=f"dl1d_{res['name']}_{tag}",
                 )
@@ -2027,12 +2050,12 @@ with tab_2d:
                 txt_buf = io.StringIO()
                 np.savetxt(txt_buf, np.c_[q, intensity], header="Q(1/A)\tIntensity(a.u.)")
                 lc2.download_button(
-                    f"Download line cut {angles} data (.txt)", txt_buf.getvalue(),
+                    f"Download {lc_label} data (.txt)", txt_buf.getvalue(),
                     file_name=f"{res['name']}_lineprofile_{tag}.txt", mime="text/plain",
                     key=f"dltxt_{res['name']}_{tag}",
                 )
                 lc2.download_button(
-                    f"Download line cut {angles} data (.csv)",
+                    f"Download {lc_label} data (.csv)",
                     linecut_df.to_csv(index=False),
                     file_name=f"{res['name']}_lineprofile_{tag}.csv", mime="text/csv",
                     key=f"dlcsv_{res['name']}_{tag}",
